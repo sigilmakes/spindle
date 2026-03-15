@@ -32,7 +32,7 @@ setExtensionDir(srcDir);
 export default function spindle(pi: ExtensionAPI) {
     // Register SPINDLE.md as a skill so pi includes it in the system prompt
     const extensionDir = path.dirname(fileURLToPath(import.meta.url));
-    const skillPath = path.join(extensionDir, "..", "docs", "SPINDLE.md");
+    const skillPath = path.join(extensionDir, "..", "skills", "SPINDLE.md");
     pi.on("resources_discover", () => {
         if (fs.existsSync(skillPath)) {
             return { skillPaths: [skillPath] };
