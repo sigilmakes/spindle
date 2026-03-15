@@ -64,18 +64,9 @@ const srcDir = __dirname.endsWith("/dist") || __dirname.endsWith("\\dist")
 setExtensionDir(srcDir);
 
 export default function spindle(pi: ExtensionAPI) {
-    // Register SPINDLE.md as a skill — check both dev (repo) and installed (extension dir) paths
+    // Skill file lives at ~/.pi/agent/skills/spindle/SKILL.md (standard location).
+    // No resources_discover registration needed — pi finds it automatically.
     const extensionDir = path.dirname(fileURLToPath(import.meta.url));
-    const skillPath = [
-        path.join(extensionDir, "..", "skills", "SPINDLE.md"),  // dev: src/../skills/
-        path.join(extensionDir, "skills", "SPINDLE.md"),        // installed: extension/skills/
-        path.join(extensionDir, "SPINDLE.md"),                  // flat: extension/SPINDLE.md
-    ].find(p => fs.existsSync(p)) ?? path.join(extensionDir, "..", "skills", "SPINDLE.md");
-    pi.on("resources_discover", () => {
-        if (fs.existsSync(skillPath)) {
-            return { skillPaths: [skillPath] };
-        }
-    });
 
     /** Names of all injected builtins — used by vars()/clear() to exclude from user variables. */
     const BUILTIN_NAMES = new Set([
