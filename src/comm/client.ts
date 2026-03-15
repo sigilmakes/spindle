@@ -14,6 +14,7 @@ export class CommClient {
     private rank: number;
     private inbox: ReceivedMessage[] = [];
     private waiters: Array<{ from?: number; resolve: (msg: ReceivedMessage) => void }> = [];
+    private barrierWaiters = new Map<string, Array<() => void>>();
 
     constructor(rank: number) {
         this.rank = rank;
@@ -59,6 +60,11 @@ export class CommClient {
             waiter.resolve({ from: -1, msg: "[disconnected]" });
         }
         this.waiters = [];
+        // Release any pending barrier waiters
+        for (const waiters of this.barrierWaiters.values()) {
+            for (const resolve of waiters) resolve();
+        }
+        this.barrierWaiters.clear();
     }
 
     send(to: number, msg: string, data?: unknown): void {
@@ -79,11 +85,37 @@ export class CommClient {
         });
     }
 
+    /**
+     * Block until all threads reach this barrier. All threads must call
+     * barrier() with the same name for any of them to proceed.
+     *
+     * @param name Optional barrier name. Defaults to "default". Use distinct
+     *   names for multiple synchronization points.
+     */
+    barrier(name: string = "default"): Promise<void> {
+        this.write({ type: "barrier", from: this.rank, barrierName: name });
+        return new Promise(resolve => {
+            const waiters = this.barrierWaiters.get(name) || [];
+            waiters.push(resolve);
+            this.barrierWaiters.set(name, waiters);
+        });
+    }
+
     get connected(): boolean {
         return this.socket !== null && !this.socket.destroyed;
     }
 
     private handleIncoming(msg: CommMessage): void {
+        if (msg.type === "barrier_release") {
+            const name = msg.barrierName ?? "default";
+            const waiters = this.barrierWaiters.get(name);
+            if (waiters) {
+                for (const resolve of waiters) resolve();
+                this.barrierWaiters.delete(name);
+            }
+            return;
+        }
+
         if (msg.type !== "send" && msg.type !== "broadcast") return;
 
         const received: ReceivedMessage = {

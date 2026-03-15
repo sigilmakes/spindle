@@ -104,6 +104,7 @@ export type DisplayItem =
     | { type: "text"; text: string }
     | { type: "toolCall"; name: string; args: Record<string, unknown>; done: boolean }
     | { type: "comm"; direction: "sent" | "received"; peer: number; msg: string }
+    | { type: "barrier"; name: string; arrived: number; total: number }
     | { type: "warning"; text: string };
 
 export interface ThreadState {
@@ -342,7 +343,24 @@ export async function dispatchThreads(
     let commSocketPath: string | null = null;
     if (communicate) {
         commServer = new CommServer({
+            size: specs.length,
             onMessage(from, to, msg) {
+                // Barrier messages have format "barrier:<name> (<arrived>/<total>)"
+                const barrierMatch = msg.match(/^barrier:(\S+) \((\d+)\/(\d+)\)$/);
+                if (barrierMatch) {
+                    const sender = states[from];
+                    if (sender) {
+                        sender.displayItems.push({
+                            type: "barrier",
+                            name: barrierMatch[1],
+                            arrived: parseInt(barrierMatch[2], 10),
+                            total: parseInt(barrierMatch[3], 10),
+                        });
+                    }
+                    emit();
+                    return;
+                }
+
                 // Truncate message for display
                 const preview = msg.length > 60 ? msg.slice(0, 60) + "..." : msg;
 

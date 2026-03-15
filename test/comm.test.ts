@@ -273,3 +273,161 @@ describe("CommServer + CommClient", () => {
         }
     });
 });
+
+describe("barriers", () => {
+    it("releases all clients when all ranks arrive", async () => {
+        const server = trackServer(new CommServer({ size: 3 }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        const c2 = trackClient(new CommClient(2));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+        await c2.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        const results: number[] = [];
+        const b0 = c0.barrier().then(() => results.push(0));
+        const b1 = c1.barrier().then(() => results.push(1));
+
+        // Only 2 of 3 arrived — should not release yet
+        await new Promise(r => setTimeout(r, 50));
+        expect(results).toHaveLength(0);
+
+        // Third arrives — all released
+        const b2 = c2.barrier().then(() => results.push(2));
+        await Promise.all([b0, b1, b2]);
+
+        expect(results).toHaveLength(3);
+        expect(results.sort()).toEqual([0, 1, 2]);
+    });
+
+    it("supports named barriers independently", async () => {
+        const server = trackServer(new CommServer({ size: 2 }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        const order: string[] = [];
+
+        // Rank 0 hits barrier "alpha", rank 1 hits barrier "beta"
+        // Neither should release because they're different barriers
+        const a0 = c0.barrier("alpha").then(() => order.push("a0"));
+        const b1 = c1.barrier("beta").then(() => order.push("b1"));
+        await new Promise(r => setTimeout(r, 50));
+        expect(order).toHaveLength(0);
+
+        // Now rank 1 hits "alpha" — releases alpha
+        const a1 = c1.barrier("alpha").then(() => order.push("a1"));
+        await Promise.all([a0, a1]);
+        expect(order).toContain("a0");
+        expect(order).toContain("a1");
+        expect(order).not.toContain("b1"); // beta still waiting
+
+        // Rank 0 hits "beta" — releases beta
+        const b0 = c0.barrier("beta").then(() => order.push("b0"));
+        await Promise.all([b1, b0]);
+        expect(order).toContain("b1");
+        expect(order).toContain("b0");
+    });
+
+    it("default barrier name works", async () => {
+        const server = trackServer(new CommServer({ size: 2 }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        const released: boolean[] = [false, false];
+        const b0 = c0.barrier().then(() => { released[0] = true; });
+        const b1 = c1.barrier().then(() => { released[1] = true; });
+        await Promise.all([b0, b1]);
+
+        expect(released).toEqual([true, true]);
+    });
+
+    it("barrier can be reused after release", async () => {
+        const server = trackServer(new CommServer({ size: 2 }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        // First barrier
+        await Promise.all([c0.barrier("sync"), c1.barrier("sync")]);
+
+        // Same name again — should work independently
+        await Promise.all([c0.barrier("sync"), c1.barrier("sync")]);
+    });
+
+    it("fires onMessage for barrier arrivals", async () => {
+        const messages: string[] = [];
+        const server = trackServer(new CommServer({
+            size: 2,
+            onMessage(_from, _to, msg) { messages.push(msg); },
+        }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        await Promise.all([c0.barrier("phase1"), c1.barrier("phase1")]);
+
+        expect(messages).toHaveLength(2);
+        expect(messages[0]).toBe("barrier:phase1 (1/2)");
+        expect(messages[1]).toBe("barrier:phase1 (2/2)");
+    });
+
+    it("disconnect releases pending barrier waiters", async () => {
+        const server = trackServer(new CommServer({ size: 3 }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        let released = false;
+        const b0 = c0.barrier().then(() => { released = true; });
+
+        // Only 2 of 3 arrived — won't release. Disconnect c0.
+        await new Promise(r => setTimeout(r, 30));
+        expect(released).toBe(false);
+
+        c0.disconnect();
+        await b0;
+        expect(released).toBe(true); // released by disconnect cleanup
+    });
+
+    it("barrier without size configured is a no-op", async () => {
+        // size=0 (default) means barriers can't fire
+        const server = trackServer(new CommServer());
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        await c0.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        let released = false;
+        c0.barrier().then(() => { released = true; });
+
+        await new Promise(r => setTimeout(r, 50));
+        // Server ignores the barrier message — client waits forever (until disconnect)
+        expect(released).toBe(false);
+    });
+});

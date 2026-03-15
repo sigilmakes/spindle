@@ -243,6 +243,42 @@ describe("formatExecResult", () => {
         expect(text).toContain("File collision");
         expect(text).toContain("src/app.ts");
     });
+
+    it("renders barrier display items", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 1000,
+                displayItems: [
+                    { type: "barrier", name: "phase1", arrived: 2, total: 3 },
+                ],
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("barrier");
+        expect(text).toContain("phase1");
+        expect(text).toContain("2/3");
+    });
+
+    it("renders released barrier", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 1000,
+                displayItems: [
+                    { type: "barrier", name: "sync", arrived: 3, total: 3 },
+                ],
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("released");
+    });
 });
 
 describe("formatDispatchUpdate", () => {

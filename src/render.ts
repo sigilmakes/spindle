@@ -130,6 +130,11 @@ function formatThreadColumn(state: ThreadState, expanded: boolean, theme: Theme)
             } else {
                 col += "\n  " + theme.fg("muted", "← ") + theme.fg("accent", `rank ${item.peer}`) + theme.fg("dim", `: ${item.msg}`);
             }
+        } else if (item.type === "barrier") {
+            const status = item.arrived >= item.total
+                ? theme.fg("success", `⊟ barrier '${item.name}' released`)
+                : theme.fg("accent", `⊞ barrier '${item.name}' (${item.arrived}/${item.total})`);
+            col += "\n  " + status;
         } else if (item.type === "warning") {
             col += "\n  " + theme.fg("warning", item.text);
         } else {

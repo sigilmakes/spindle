@@ -14,6 +14,8 @@ interface RankedClient {
 }
 
 export interface CommServerOptions {
+    /** Total number of threads in the dispatch. Required for barriers. */
+    size?: number;
     onMessage?: (from: number, to: number | undefined, msg: string) => void;
 }
 
@@ -24,9 +26,14 @@ export class CommServer {
     private clients = new Map<number, RankedClient>();
     private pendingSockets = new Set<net.Socket>();
     private queued = new Map<number, Buffer[]>();
+    private size: number;
     private onMessage?: (from: number, to: number | undefined, msg: string) => void;
 
+    /** Tracks which ranks have arrived at each named barrier. */
+    private barriers = new Map<string, Set<number>>();
+
     constructor(options?: CommServerOptions) {
+        this.size = options?.size ?? 0;
         this.onMessage = options?.onMessage;
     }
 
@@ -58,6 +65,7 @@ export class CommServer {
         for (const client of this.clients.values()) client.socket.destroy();
         this.clients.clear();
         this.queued.clear();
+        this.barriers.clear();
 
         if (this.server) {
             await new Promise<void>(resolve => this.server!.close(() => resolve()));
@@ -128,6 +136,35 @@ export class CommServer {
                     this.writeSafe(client.socket, frame);
                 }
             }
+        } else if (msg.type === "barrier") {
+            this.handleBarrier(msg);
+        }
+    }
+
+    private handleBarrier(msg: CommMessage): void {
+        const name = msg.barrierName ?? "default";
+        if (this.size <= 0) return; // barriers require known size
+
+        let arrived = this.barriers.get(name);
+        if (!arrived) {
+            arrived = new Set<number>();
+            this.barriers.set(name, arrived);
+        }
+        arrived.add(msg.from);
+        this.onMessage?.(msg.from, undefined, `barrier:${name} (${arrived.size}/${this.size})`);
+
+        if (arrived.size >= this.size) {
+            // All ranks arrived — release everyone
+            const release: CommMessage = {
+                type: "barrier_release",
+                from: -1,
+                barrierName: name,
+            };
+            const frame = encode(release);
+            for (const client of this.clients.values()) {
+                this.writeSafe(client.socket, frame);
+            }
+            this.barriers.delete(name);
         }
     }
 

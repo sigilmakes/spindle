@@ -1,7 +1,7 @@
 import type { CommMessage } from "./types.js";
 
 const MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
-const VALID_TYPES = new Set(["announce", "send", "broadcast"]);
+const VALID_TYPES = new Set(["announce", "send", "broadcast", "barrier", "barrier_release"]);
 
 function isValidCommMessage(value: unknown): value is CommMessage {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return false;

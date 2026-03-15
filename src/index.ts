@@ -230,6 +230,23 @@ export default function spindle(pi: ExtensionAPI) {
                     return { content: [{ type: "text", text: `Broadcast to ${size - 1} threads.` }], details: undefined };
                 },
             });
+
+            pi.registerTool({
+                name: "spindle_barrier",
+                label: "Barrier",
+                description: `Block until all ${size} threads reach this barrier. Use named barriers for multiple sync points. You are rank ${rank} of ${size}.`,
+                parameters: Type.Object({
+                    name: Type.Optional(Type.String({ description: "Barrier name (default: 'default'). Use distinct names for multiple sync points." })),
+                }),
+                async execute(_id, params) {
+                    const barrierName = params.name ?? "default";
+                    await client.barrier(barrierName);
+                    return {
+                        content: [{ type: "text", text: `Barrier '${barrierName}' released — all ${size} threads synchronized.` }],
+                        details: undefined,
+                    };
+                },
+            });
         }
     });
 
@@ -261,6 +278,7 @@ export default function spindle(pi: ExtensionAPI) {
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
             "Recursive Spindle: pass `{ spindle: true }` to `thread()` or `llm()` to give the sub-agent its own Spindle REPL — it can dispatch its own threads.",
             "Thread communication: `dispatch([...], { communicate: true })` lets threads send/recv/broadcast to each other by rank during execution.",
+            "Barriers: `spindle_barrier({ name: 'phase1' })` blocks until all threads reach it. Use for multi-phase work where phase 2 depends on all threads finishing phase 1.",
             "When dispatching threads, ensure each thread targets different files. Concurrent edits to the same file are detected (FileConflictError) and may cause thread failures.",
             "`await sleep(ms)` for delays.",
             "REPL output truncated to 8192 chars. Store results in variables, console.log what you need.",
