@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { highlightCode, type Theme } from "@mariozechner/pi-coding-agent";
-import { type DisplayItem, type Episode, type ThreadState, COLLAPSED_ITEM_COUNT } from "./threads.js";
+import { type DisplayItem, type Episode, type ThreadState, COLLAPSED_ITEM_COUNT, OUTPUT_DISPLAY_THRESHOLD, formatBytes } from "./threads.js";
 
 export interface SpindleExecDetails {
     code: string;
@@ -144,11 +144,18 @@ function formatThreadColumn(state: ThreadState, expanded: boolean, theme: Theme)
     const tokens = state.usage.input + state.usage.output;
 
     if (state.status === "done" && state.episode) {
-        col += "\n  " + theme.fg("dim", `${elapsed.toFixed(0)}s · ${formatTokens(tokens)} · $${state.cost.toFixed(4)}`);
+        let stats = `${elapsed.toFixed(0)}s · ${formatTokens(tokens)} · $${state.cost.toFixed(4)}`;
+        if (state.outputBytes >= OUTPUT_DISPLAY_THRESHOLD) {
+            stats += ` · ${formatBytes(state.outputBytes)}`;
+        }
+        col += "\n  " + theme.fg("dim", stats);
     } else if (state.status === "running") {
         const parts = [`${elapsed.toFixed(0)}s`];
         if (tokens > 0) parts.push(formatTokens(tokens));
         if (state.cost > 0) parts.push(`$${state.cost.toFixed(4)}`);
+        if (state.outputBytes >= OUTPUT_DISPLAY_THRESHOLD) {
+            parts.push(formatBytes(state.outputBytes));
+        }
         col += "\n  " + theme.fg("dim", `Working... ${parts.join(" · ")}`);
     }
 

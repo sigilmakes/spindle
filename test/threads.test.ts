@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, createThreadSpec, dispatchThreads, isThreadSpec, truncateRaw, MAX_RAW_SIZE } from "../src/threads.js";
+import { parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, createThreadSpec, dispatchThreads, isThreadSpec, truncateRaw, MAX_RAW_SIZE, MEMORY_WARNING_THRESHOLD, OUTPUT_DISPLAY_THRESHOLD, formatBytes } from "../src/threads.js";
 import type { Episode, ThreadState, ThreadSpec } from "../src/threads.js";
 import type { SubAgentResult } from "../src/agents.js";
 import { pruneMessages } from "../src/agents.js";
@@ -11,6 +11,7 @@ function makeResult(text: string, overrides?: Partial<SubAgentResult>): SubAgent
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 0, turns: 1 },
         exitCode: 0,
         durationMs: 1000,
+        outputBytes: 0,
         ...overrides,
     };
 }
@@ -423,5 +424,63 @@ describe("pruneMessages", () => {
         const pruned = pruneMessages(messages);
         // No last assistant, so tool result gets pruned
         expect(pruned[0].content[0].text).toContain("[pruned:");
+    });
+});
+
+// --- W2B: Memory-aware dispatch ---
+
+describe("formatBytes", () => {
+    it("formats bytes", () => {
+        expect(formatBytes(500)).toBe("500B");
+    });
+
+    it("formats kilobytes", () => {
+        expect(formatBytes(1024)).toBe("1.0KB");
+        expect(formatBytes(1536)).toBe("1.5KB");
+        expect(formatBytes(102400)).toBe("100.0KB");
+    });
+
+    it("formats megabytes", () => {
+        expect(formatBytes(1024 * 1024)).toBe("1.0MB");
+        expect(formatBytes(2.3 * 1024 * 1024)).toBe("2.3MB");
+        expect(formatBytes(100 * 1024 * 1024)).toBe("100.0MB");
+    });
+
+    it("formats gigabytes", () => {
+        expect(formatBytes(1024 * 1024 * 1024)).toBe("1.0GB");
+    });
+});
+
+describe("MEMORY_WARNING_THRESHOLD", () => {
+    it("is 100MB", () => {
+        expect(MEMORY_WARNING_THRESHOLD).toBe(100 * 1024 * 1024);
+    });
+});
+
+describe("OUTPUT_DISPLAY_THRESHOLD", () => {
+    it("is 100KB", () => {
+        expect(OUTPUT_DISPLAY_THRESHOLD).toBe(100 * 1024);
+    });
+});
+
+describe("SubAgentResult.outputBytes", () => {
+    it("is present in makeResult helper", () => {
+        const result = makeResult("hello");
+        expect(result.outputBytes).toBe(0);
+    });
+
+    it("can be overridden", () => {
+        const result = makeResult("hello", { outputBytes: 5000 });
+        expect(result.outputBytes).toBe(5000);
+    });
+});
+
+describe("parseEpisode preserves outputBytes context", () => {
+    it("works with result that has outputBytes", () => {
+        const text = "<episode>\nstatus: success\nsummary: Done.\nfindings:\nartifacts:\nblockers:\n</episode>";
+        const result = makeResult(text, { outputBytes: 1024 * 1024 });
+        const ep = parseEpisode(result, { task: "t", agent: "a" });
+        expect(ep.status).toBe("success");
+        // outputBytes doesn't directly appear on Episode, it's on ThreadState
     });
 });

@@ -57,6 +57,7 @@ describe("stepped thread generator", () => {
                 usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.015, contextTokens: 150, turns: 3 },
                 exitCode: 0,
                 durationMs: 2000,
+                outputBytes: 0,
             };
         });
 
@@ -98,6 +99,7 @@ describe("stepped thread generator", () => {
             usage: { input: 50, output: 25, cacheRead: 0, cacheWrite: 0, cost: 0.005, contextTokens: 75, turns: 1 },
             exitCode: 0,
             durationMs: 500,
+            outputBytes: 0,
         });
 
         const spec = createThreadSpec("simple task", {
@@ -123,6 +125,7 @@ describe("stepped thread generator", () => {
             usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
             exitCode: 0,
             durationMs: 100,
+            outputBytes: 0,
         });
 
         // Stepped thread
@@ -143,6 +146,7 @@ describe("stepped thread generator", () => {
             usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
             exitCode: 0,
             durationMs: 100,
+            outputBytes: 0,
         });
 
         const simple = createThreadSpec("t", { defaultCwd: "/tmp", defaultModel: undefined });
@@ -169,6 +173,7 @@ describe("stepped thread generator", () => {
                 usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 0, turns: 1 },
                 exitCode: 0,
                 durationMs: 1000,
+                outputBytes: 0,
             };
         });
 
@@ -201,6 +206,7 @@ describe("stepped thread generator", () => {
             exitCode: 1,
             error: "Process failed",
             durationMs: 200,
+            outputBytes: 0,
         });
 
         const spec = createThreadSpec("failing task", {
@@ -257,6 +263,7 @@ describe("stepped thread generator", () => {
                 usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
                 exitCode: 0,
                 durationMs: 100,
+                outputBytes: 0,
             };
         });
 
@@ -288,6 +295,7 @@ describe("stepped thread generator", () => {
             usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
             exitCode: 0,
             durationMs: 100,
+            outputBytes: 0,
         });
 
         // Create spec but don't iterate
@@ -310,6 +318,7 @@ describe("stepped thread generator", () => {
                 usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
                 exitCode: 0,
                 durationMs: 100,
+                outputBytes: 0,
             };
         });
 

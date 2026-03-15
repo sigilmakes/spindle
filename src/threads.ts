@@ -76,7 +76,7 @@ export const MAX_RAW_SIZE = 50 * 1024;
 export const MEMORY_WARNING_THRESHOLD = 100 * 1024 * 1024;
 
 /** Output size threshold for showing bytes in stats line (100KB). */
-const OUTPUT_DISPLAY_THRESHOLD = 100 * 1024;
+export const OUTPUT_DISPLAY_THRESHOLD = 100 * 1024;
 
 /** Format byte count as human-readable string. */
 export function formatBytes(bytes: number): string {
@@ -263,6 +263,7 @@ function createThreadGenerator(
                 exitCode: 1,
                 error: error?.message,
                 durationMs: 0,
+                outputBytes: 0,
             },
         }),
     );

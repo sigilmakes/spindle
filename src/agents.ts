@@ -33,6 +33,7 @@ export interface SubAgentEvent {
     text?: string;
     usage?: UsageStats;
     episodeRaw?: string;
+    outputBytes?: number;
 }
 
 export interface SubAgentResult {
@@ -43,6 +44,7 @@ export interface SubAgentResult {
     exitCode: number;
     error?: string;
     durationMs: number;
+    outputBytes: number;
 }
 
 export interface SpawnOptions {
@@ -220,6 +222,7 @@ export async function spawnSubAgent(
                 text: `Unknown agent: "${options.agent}". Available: ${available}`,
                 messages: [], usage: emptyUsage(), exitCode: 1,
                 error: `Unknown agent: "${options.agent}"`, durationMs: Date.now() - start,
+                outputBytes: 0,
             };
         }
     }
@@ -262,6 +265,7 @@ export async function spawnSubAgent(
     let stderr = "";
     let processModel: string | undefined;
     let errorMessage: string | undefined;
+    let totalOutputBytes = 0;
     const onEvent = options.onEvent;
     const episodeScanner = new EpisodeScanner();
 
@@ -326,7 +330,7 @@ export async function spawnSubAgent(
                             }
                         }
 
-                        onEvent?.({ type: "turn", usage: { ...usage } });
+                        onEvent?.({ type: "turn", usage: { ...usage }, outputBytes: totalOutputBytes });
                     }
                 }
 
@@ -336,6 +340,7 @@ export async function spawnSubAgent(
             };
 
             proc.stdout!.on("data", (data: Buffer) => {
+                totalOutputBytes += data.length;
                 buffer += data.toString();
                 const lines = buffer.split("\n");
                 buffer = lines.pop() || "";
@@ -378,6 +383,7 @@ export async function spawnSubAgent(
             model: processModel, exitCode,
             error: errorMessage || (exitCode !== 0 ? stderr : undefined),
             durationMs: Date.now() - start,
+            outputBytes: totalOutputBytes,
         };
     } finally {
         if (tmpFile) try { fs.unlinkSync(tmpFile); } catch {}

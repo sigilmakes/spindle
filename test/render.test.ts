@@ -28,7 +28,7 @@ function makeThreadState(overrides?: Partial<ThreadState>): ThreadState {
         index: 0, task: "test task", agent: "scout",
         status: "pending", displayItems: [], toolCount: 0,
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-        startTime: 0, durationMs: 0, cost: 0,
+        startTime: 0, durationMs: 0, cost: 0, outputBytes: 0,
         ...overrides,
     };
 }
@@ -301,6 +301,75 @@ describe("formatDispatchUpdate", () => {
         // Should deduplicate — same warning on both threads shown once
         const matches = text.match(/File collision/g);
         expect(matches).toHaveLength(1);
+    });
+});
+
+describe("output bytes in stats (W2B)", () => {
+    it("shows output size in done thread stats when significant", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "done", durationMs: 3000, cost: 0.02,
+                outputBytes: 2.3 * 1024 * 1024, // 2.3MB
+                episode: makeEpisode(),
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 3000, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("2.3MB");
+    });
+
+    it("hides output size when below threshold", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "done", durationMs: 3000, cost: 0.02,
+                outputBytes: 50 * 1024, // 50KB, below 100KB threshold
+                episode: makeEpisode(),
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 3000, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).not.toContain("KB");
+        expect(text).not.toContain("MB");
+    });
+
+    it("shows output size in running thread stats when significant", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 5000,
+                outputBytes: 500 * 1024, // 500KB
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 5000, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("500.0KB");
+    });
+
+    it("shows memory warning display items", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 1000,
+                outputBytes: 60 * 1024 * 1024,
+                displayItems: [
+                    { type: "warning", text: "⚠ High memory: 120.0MB aggregate output across 2 threads" },
+                ],
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 1000, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("High memory");
+        expect(text).toContain("120.0MB");
     });
 });
 
