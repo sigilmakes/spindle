@@ -7,3 +7,4 @@ ARCHITECTURE.md
 ARCHITECTURE_DIAGRAM.txt
 *.md
 !README.md
+!docs/*.md
