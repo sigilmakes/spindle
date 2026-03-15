@@ -40,10 +40,12 @@ describe("formatCodeForDisplay", () => {
         expect(result).toContain('console.log("hi")');
     });
 
-    it("truncates code beyond maxLines", () => {
+    it("shows all code lines without truncation", () => {
         const lines = Array.from({ length: 30 }, (_, i) => `line${i}`).join("\n");
-        const result = formatCodeForDisplay(lines, theme, 15);
-        expect(result).toContain("15 more lines");
+        const result = formatCodeForDisplay(lines, theme);
+        expect(result).toContain("line0");
+        expect(result).toContain("line29");
+        expect(result).not.toContain("more lines");
     });
 
     it("handles empty code", () => {
@@ -216,7 +218,7 @@ describe("formatStatusResult", () => {
         const details: SpindleStatusDetails = {
             variables: [{ name: "x", type: "number", preview: "42" }],
             usage: { totalCost: 0.05, totalEpisodes: 3, totalLlmCalls: 7 },
-            config: { subModel: "fast-model", outputLimit: 8192, timeoutMs: 300000 },
+            config: { subModel: "fast-model", outputLimit: 8192 },
         };
         const text = formatStatusResult(details, theme);
         expect(text).toContain("x");
@@ -228,7 +230,7 @@ describe("formatStatusResult", () => {
         const details: SpindleStatusDetails = {
             variables: [],
             usage: { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 },
-            config: { subModel: undefined, outputLimit: 8192, timeoutMs: 300000 },
+            config: { subModel: undefined, outputLimit: 8192 },
         };
         expect(formatStatusResult(details, theme)).toContain("No variables");
     });

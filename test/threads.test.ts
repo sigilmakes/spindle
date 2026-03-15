@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseEpisode, EPISODE_SUFFIX, createThreadSpec, dispatchThreads, isThreadSpec } from "../src/threads.js";
+import { parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, createThreadSpec, dispatchThreads, isThreadSpec } from "../src/threads.js";
 import type { Episode, ThreadState, ThreadSpec } from "../src/threads.js";
 import type { SubAgentResult } from "../src/agents.js";
 
@@ -89,6 +89,14 @@ blockers:
         expect(parseEpisode(makeResult(text), { task: "t", agent: "a" }).raw).toBe(text);
     });
 
+    it("parses intermediate episode blocks with running status override", () => {
+        const text = 'Step 1 done.\n\n<episode>\nstatus: success\nsummary: Completed step 1.\nfindings:\n- Found A\nartifacts:\nblockers:\n</episode>\n\nNow doing step 2...\n\n<episode>\nstatus: success\nsummary: All done.\nfindings:\n- Found B\nartifacts:\nblockers:\n</episode>';
+        // The parser should grab the LAST block for the final episode
+        const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
+        expect(ep.summary).toBe("All done.");
+        expect(ep.findings).toEqual(["Found B"]);
+    });
+
     it("grabs the LAST episode block when source code quotes the template", () => {
         const text = 'Here is the EPISODE_SUFFIX constant:\n```\n<episode>\nstatus: success | failure\nsummary: template\nfindings:\n</episode>\n```\n\nDone analyzing.\n\n<episode>\nstatus: success\nsummary: Actually completed the analysis.\nfindings:\n- Real finding\nartifacts:\nblockers:\n</episode>';
         const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
@@ -130,6 +138,86 @@ describe("ThreadSpec", () => {
         expect(typeof spec.next).toBe("function");
         expect(typeof spec.return).toBe("function");
         expect(typeof spec.throw).toBe("function");
+    });
+});
+
+describe("parseEpisodeBlock", () => {
+    const baseMeta = { task: "t", agent: "a", model: "test-model", cost: 0.005, duration: 500 };
+
+    it("parses a running episode block", () => {
+        const block = "status: running\nsummary: Step 1 done.\nfindings:\n- Found X\nartifacts:\n- src/foo.ts\nblockers:\n";
+        const ep = parseEpisodeBlock(block, baseMeta);
+        expect(ep.status).toBe("running");
+        expect(ep.summary).toBe("Step 1 done.");
+        expect(ep.findings).toEqual(["Found X"]);
+        expect(ep.artifacts).toEqual(["src/foo.ts"]);
+        expect(ep.blockers).toEqual([]);
+        expect(ep.task).toBe("t");
+        expect(ep.agent).toBe("a");
+        expect(ep.model).toBe("test-model");
+        expect(ep.cost).toBe(0.005);
+        expect(ep.duration).toBe(500);
+    });
+
+    it("parses terminal statuses", () => {
+        expect(parseEpisodeBlock("status: success\nsummary: Done.\nfindings:\nartifacts:\nblockers:\n", baseMeta).status).toBe("success");
+        expect(parseEpisodeBlock("status: failure\nsummary: Failed.\nfindings:\nartifacts:\nblockers:\n", baseMeta).status).toBe("failure");
+        expect(parseEpisodeBlock("status: blocked\nsummary: Stuck.\nfindings:\nartifacts:\nblockers:\n", baseMeta).status).toBe("blocked");
+    });
+
+    it("defaults to running when status is missing", () => {
+        const ep = parseEpisodeBlock("summary: No status field.\nfindings:\nartifacts:\nblockers:\n", baseMeta);
+        expect(ep.status).toBe("running");
+    });
+
+    it("preserves meta fields", () => {
+        const meta = { task: "audit", agent: "scout", model: "gpt-4", cost: 0.02, duration: 3000 };
+        const ep = parseEpisodeBlock("status: running\nsummary: Working.\nfindings:\nartifacts:\nblockers:\n", meta);
+        expect(ep.task).toBe("audit");
+        expect(ep.agent).toBe("scout");
+        expect(ep.model).toBe("gpt-4");
+        expect(ep.cost).toBe(0.02);
+        expect(ep.duration).toBe(3000);
+        expect(ep.toolCalls).toBe(0);
+    });
+
+    it("handles empty block gracefully", () => {
+        const ep = parseEpisodeBlock("", baseMeta);
+        expect(ep.status).toBe("running");
+        expect(ep.summary).toBe("");
+        expect(ep.findings).toEqual([]);
+    });
+});
+
+describe("STEPPED_EPISODE_SUFFIX", () => {
+    it("contains running status for checkpoints", () => {
+        expect(STEPPED_EPISODE_SUFFIX).toContain("status: running");
+    });
+
+    it("contains terminal status for final episode", () => {
+        expect(STEPPED_EPISODE_SUFFIX).toContain("status: success | failure | blocked");
+    });
+
+    it("instructs about checkpoint emission", () => {
+        expect(STEPPED_EPISODE_SUFFIX).toContain("checkpoint");
+        expect(STEPPED_EPISODE_SUFFIX).toContain("milestone");
+    });
+});
+
+describe("ThreadSpec (stepped)", () => {
+    it("accepts stepped option", () => {
+        const spec = createThreadSpec("task", { stepped: true, defaultCwd: "/tmp", defaultModel: undefined });
+        expect(isThreadSpec(spec)).toBe(true);
+        expect(spec.opts.stepped).toBe(true);
+    });
+
+    it("implements AsyncGenerator protocol with stepped", () => {
+        const spec = createThreadSpec("task", { stepped: true, agent: "worker", defaultCwd: "/tmp", defaultModel: undefined });
+        expect(typeof spec[Symbol.asyncIterator]).toBe("function");
+        expect(typeof spec.next).toBe("function");
+        expect(typeof spec.return).toBe("function");
+        expect(typeof spec.throw).toBe("function");
+        expect(spec.agent).toBe("worker");
     });
 });
 

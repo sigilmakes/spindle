@@ -5,6 +5,7 @@ import { type DisplayItem, type Episode, type ThreadState, COLLAPSED_ITEM_COUNT 
 
 export interface SpindleExecDetails {
     code: string;
+    file?: string;
     episodes?: Episode[];
     threadStates?: ThreadState[];
     durationMs?: number;
@@ -14,10 +15,10 @@ export interface SpindleExecDetails {
 export interface SpindleStatusDetails {
     variables: Array<{ name: string; type: string; preview: string }>;
     usage: { totalCost: number; totalEpisodes: number; totalLlmCalls: number };
-    config: { subModel: string | undefined; outputLimit: number; timeoutMs: number };
+    config: { subModel: string | undefined; outputLimit: number };
 }
 
-export function formatCodeForDisplay(code: string, theme: Theme, maxLines = 15): string {
+export function formatCodeForDisplay(code: string, theme: Theme): string {
     let highlighted: string[];
     try {
         highlighted = highlightCode(code, "javascript");
@@ -26,13 +27,14 @@ export function formatCodeForDisplay(code: string, theme: Theme, maxLines = 15):
     }
 
     let text = theme.fg("toolTitle", theme.bold("spindle_exec")) + "\n";
-    for (const line of highlighted.slice(0, maxLines)) {
+    for (const line of highlighted) {
         text += "  " + line + "\n";
     }
-    if (highlighted.length > maxLines) {
-        text += theme.fg("muted", `  ... ${highlighted.length - maxLines} more lines`);
-    }
     return text.trimEnd();
+}
+
+export function formatFileExecForDisplay(file: string, theme: Theme): string {
+    return theme.fg("toolTitle", theme.bold("spindle_exec")) + " " + theme.fg("accent", file);
 }
 
 // --- Tool call formatting (adapted from subagent extension) ---
@@ -251,7 +253,6 @@ export function formatStatusResult(details: SpindleStatusDetails, theme: Theme):
     text += "\n" + theme.fg("muted", "─── Config ───") + "\n";
     text += `  Sub-model: ${details.config.subModel || "(default)"}\n`;
     text += `  Output limit: ${details.config.outputLimit} chars\n`;
-    text += `  Timeout: ${details.config.timeoutMs / 1000}s\n`;
 
     return text;
 }

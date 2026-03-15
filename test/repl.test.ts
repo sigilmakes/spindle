@@ -193,14 +193,6 @@ describe("Repl", () => {
         });
     });
 
-    describe("timeout", () => {
-        it("times out long-running code", async () => {
-            const r = new Repl({ timeoutMs: 100 });
-            const result = await r.exec("await new Promise(r => setTimeout(r, 10000))");
-            expect(result.error).toContain("timed out");
-        });
-    });
-
     describe("duration tracking", () => {
         it("tracks wall-clock duration", async () => {
             const result = await repl.exec("await new Promise(r => setTimeout(r, 50))");

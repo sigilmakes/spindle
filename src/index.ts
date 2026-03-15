@@ -1,18 +1,33 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { AgentToolUpdateCallback, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
-import { spawnSubAgent, killAllSubAgents } from "./agents.js";
+import { spawnSubAgent, killAllSubAgents, setExtensionDir } from "./agents.js";
 import {
     createThreadSpec, dispatchThreads, isThreadSpec,
-    type Episode, type ThreadOptions, type ThreadSpec, type ThreadState,
+    type Episode, type ThreadOptions, type ThreadSpec, type ThreadState, type DispatchOptions,
 } from "./threads.js";
+import { CommClient } from "./comm/index.js";
 import {
-    formatCodeForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
+    formatCodeForDisplay, formatFileExecForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
+
+// Register the extension directory so sub-agents can be spawned with --extension
+// pointing back at this extension's source entry point.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// If running from dist/, resolve to the source src/ directory.
+// If already in src/ (jiti), use as-is.
+const srcDir = __dirname.endsWith("/dist") || __dirname.endsWith("\\dist")
+    ? path.join(path.dirname(__dirname), "src")
+    : __dirname;
+setExtensionDir(srcDir);
 
 export default function spindle(pi: ExtensionAPI) {
     let repl: Repl | null = null;
@@ -36,10 +51,11 @@ export default function spindle(pi: ExtensionAPI) {
         r.inject({ load: fileIO.load, save: fileIO.save });
 
         r.inject({
-            llm: async (prompt: string, opts?: { agent?: string; model?: string; tools?: string[]; timeout?: number }) => {
+            llm: async (prompt: string, opts?: { agent?: string; model?: string; tools?: string[]; timeout?: number; spindle?: boolean }) => {
                 const result = await spawnSubAgent(prompt, {
                     agent: opts?.agent, model: opts?.model ?? subModel,
                     tools: opts?.tools, timeout: opts?.timeout,
+                    spindle: opts?.spindle,
                     defaultCwd: cwd, defaultModel: subModel,
                 }, currentSignal);
                 cumulativeUsage.totalCost += result.usage.cost;
@@ -53,7 +69,7 @@ export default function spindle(pi: ExtensionAPI) {
             thread: (task: string, opts?: ThreadOptions) =>
                 createThreadSpec(task, { ...opts, defaultCwd: cwd, defaultModel: subModel }, currentSignal),
 
-            dispatch: async (specs: ThreadSpec[], concurrency?: number) => {
+            dispatch: async (specs: ThreadSpec[], opts?: { concurrency?: number; communicate?: boolean }) => {
                 const onUpdate = currentOnUpdate;
                 const code = currentCode;
                 const signal = currentSignal;
@@ -74,7 +90,12 @@ export default function spindle(pi: ExtensionAPI) {
                     });
                 };
 
-                const episodes = await dispatchThreads(specs, concurrency, onDispatchUpdate, signal);
+                const episodes = await dispatchThreads(
+                    specs,
+                    { concurrency: opts?.concurrency, communicate: opts?.communicate },
+                    onDispatchUpdate,
+                    signal,
+                );
                 for (const ep of episodes) {
                     cumulativeUsage.totalCost += ep.cost;
                     cumulativeUsage.totalEpisodes++;
@@ -91,7 +112,9 @@ export default function spindle(pi: ExtensionAPI) {
         return r;
     }
 
-    pi.on("session_start", (_event, ctx) => {
+    let commClient: CommClient | null = null;
+
+    pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
 
         const entries = ctx.sessionManager.getEntries();
@@ -102,16 +125,87 @@ export default function spindle(pi: ExtensionAPI) {
                 break;
             }
         }
+
+        // If we're a sub-agent in a communicating dispatch, connect and register comm tools
+        const commPath = process.env.SPINDLE_COMM;
+        const rankStr = process.env.SPINDLE_RANK;
+        const sizeStr = process.env.SPINDLE_SIZE;
+
+        if (commPath && rankStr && sizeStr) {
+            const rank = parseInt(rankStr, 10);
+            const size = parseInt(sizeStr, 10);
+
+            commClient = new CommClient(rank);
+            try {
+                await commClient.connect(commPath);
+            } catch {
+                commClient = null;
+                return;
+            }
+
+            const client = commClient;
+
+            pi.registerTool({
+                name: "spindle_send",
+                label: "Send",
+                description: `Send a message to another thread by rank. You are rank ${rank} of ${size}.`,
+                parameters: Type.Object({
+                    to: Type.Number({ description: "Destination thread rank" }),
+                    msg: Type.String({ description: "Message to send" }),
+                    data: Type.Optional(Type.Unknown({ description: "Structured data payload" })),
+                }),
+                async execute(_id, params) {
+                    client.send(params.to, params.msg, params.data);
+                    return { content: [{ type: "text", text: `Sent to rank ${params.to}.` }], details: undefined };
+                },
+            });
+
+            pi.registerTool({
+                name: "spindle_recv",
+                label: "Receive",
+                description: `Block until a message arrives from another thread. You are rank ${rank} of ${size}.`,
+                parameters: Type.Object({
+                    from: Type.Optional(Type.Number({ description: "Only receive from this rank" })),
+                }),
+                async execute(_id, params) {
+                    const msg = await client.recv(params.from);
+                    return {
+                        content: [{ type: "text", text: `From rank ${msg.from}: ${msg.msg}${msg.data ? "\nData: " + JSON.stringify(msg.data) : ""}` }],
+                        details: undefined,
+                    };
+                },
+            });
+
+            pi.registerTool({
+                name: "spindle_broadcast",
+                label: "Broadcast",
+                description: `Send a message to all other threads. You are rank ${rank} of ${size}.`,
+                parameters: Type.Object({
+                    msg: Type.String({ description: "Message to broadcast" }),
+                    data: Type.Optional(Type.Unknown({ description: "Structured data payload" })),
+                }),
+                async execute(_id, params) {
+                    client.broadcast(params.msg, params.data);
+                    return { content: [{ type: "text", text: `Broadcast to ${size - 1} threads.` }], details: undefined };
+                },
+            });
+        }
     });
 
-    pi.on("session_shutdown", () => { killAllSubAgents(); repl = null; });
+    pi.on("session_shutdown", () => {
+        killAllSubAgents();
+        commClient?.disconnect();
+        commClient = null;
+        repl = null;
+    });
 
     pi.registerTool({
         name: "spindle_exec",
         label: "Spindle",
         description: "Execute JavaScript in a persistent REPL with built-in tools, sub-agent orchestration, and file I/O.",
         parameters: Type.Object({
-            code: Type.String({ description: "JavaScript code to execute" }),
+            code: Type.Optional(Type.String({ description: "JavaScript code to execute" })),
+            file: Type.Optional(Type.String({ description: "Path to a .js or .mjs file to execute (alternative to code)" })),
         }),
         promptGuidelines: [
             "You have a persistent JavaScript REPL via `spindle_exec`. Variables persist across calls (use plain assignment, not const/let).",
@@ -119,27 +213,74 @@ export default function spindle(pi: ExtensionAPI) {
             "  These have pi's truncation limits — use `load()` for full file content.",
             "`await load(path)` loads a file (→ string) or directory (→ Map) into a variable without entering context.",
             "`await save(path, content)` writes data out without entering context.",
-            "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout? })` → string.",
+            "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout?, spindle? })` → string.",
             "Threads: `thread(task, opts?)` → AsyncGenerator<Episode>. `await dispatch([thread(...), ...])` → Episode[].",
             "Episodes have: status, summary, findings, artifacts, blockers, cost, duration.",
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
+            "Recursive Spindle: pass `{ spindle: true }` to `thread()` or `llm()` to give the sub-agent its own Spindle REPL — it can dispatch its own threads.",
             "`await sleep(ms)` for delays.",
             "REPL output truncated to 8192 chars. Store results in variables, console.log what you need.",
+            "Execute scripts from files: `spindle_exec({ file: \"path/to/script.js\" })` — runs a .js/.mjs file in the same REPL context with all the same builtins.",
         ],
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
             if (!repl) repl = initRepl(ctx.cwd);
 
+            // Validate: exactly one of code or file must be provided
+            if (!params.code && !params.file) {
+                return {
+                    content: [{ type: "text", text: "Error: Either 'code' or 'file' must be provided." }],
+                    details: { code: "", error: true } satisfies SpindleExecDetails,
+                    isError: true,
+                };
+            }
+            if (params.code && params.file) {
+                return {
+                    content: [{ type: "text", text: "Error: Provide either 'code' or 'file', not both." }],
+                    details: { code: "", error: true } satisfies SpindleExecDetails,
+                    isError: true,
+                };
+            }
+
+            // Resolve code — either inline or from file
+            let code: string;
+            let file: string | undefined;
+
+            if (params.file) {
+                file = params.file;
+                const resolved = path.resolve(ctx.cwd, file);
+
+                if (!/\.(js|mjs)$/.test(resolved)) {
+                    return {
+                        content: [{ type: "text", text: "Error: File must end in .js or .mjs" }],
+                        details: { code: "", file, error: true } satisfies SpindleExecDetails,
+                        isError: true,
+                    };
+                }
+
+                try {
+                    code = fs.readFileSync(resolved, "utf-8");
+                } catch (err: any) {
+                    return {
+                        content: [{ type: "text", text: `Error reading file: ${err.message}` }],
+                        details: { code: "", file, error: true } satisfies SpindleExecDetails,
+                        isError: true,
+                    };
+                }
+            } else {
+                code = params.code!;
+            }
+
             (repl as any).__lastEpisodes = undefined;
             currentOnUpdate = onUpdate;
             currentSignal = signal;
-            currentCode = params.code;
+            currentCode = code;
 
             const abortCleanup = () => killAllSubAgents();
             signal?.addEventListener("abort", abortCleanup, { once: true });
 
             try {
-                const result = await repl.exec(params.code, signal);
+                const result = await repl.exec(code, signal);
                 const episodes: Episode[] = (repl as any).__lastEpisodes || [];
 
                 const parts: string[] = [];
@@ -160,7 +301,8 @@ export default function spindle(pi: ExtensionAPI) {
                 return {
                     content: [{ type: "text", text: parts.join("\n") || "(no output)" }],
                     details: {
-                        code: params.code,
+                        code,
+                        file,
                         episodes: episodes.length > 0 ? episodes : undefined,
                         durationMs: result.durationMs,
                         error: !!result.error,
@@ -175,7 +317,10 @@ export default function spindle(pi: ExtensionAPI) {
         },
 
         renderCall(args, theme) {
-            return new Text(formatCodeForDisplay(args.code, theme), 0, 0);
+            if (args.file) {
+                return new Text(formatFileExecForDisplay(args.file, theme), 0, 0);
+            }
+            return new Text(formatCodeForDisplay(args.code || "", theme), 0, 0);
         },
 
         renderResult(result, options, theme) {
@@ -196,7 +341,7 @@ export default function spindle(pi: ExtensionAPI) {
             const details: SpindleStatusDetails = {
                 variables,
                 usage: { ...cumulativeUsage },
-                config: { subModel, outputLimit: 8192, timeoutMs: 300_000 },
+                config: { subModel, outputLimit: 8192 },
             };
 
             const varSummary = variables.length > 0
@@ -207,7 +352,7 @@ export default function spindle(pi: ExtensionAPI) {
                 content: [{ type: "text", text: [
                     "Spindle Status", "", "Variables:", varSummary, "",
                     `Usage: ${cumulativeUsage.totalLlmCalls} LLM calls, ${cumulativeUsage.totalEpisodes} episodes, $${cumulativeUsage.totalCost.toFixed(4)}`,
-                    `Config: sub-model=${subModel || "(default)"}, output-limit=8192, timeout=300s`,
+                    `Config: sub-model=${subModel || "(default)"}, output-limit=8192`,
                 ].join("\n") }],
                 details,
             };
@@ -224,7 +369,7 @@ export default function spindle(pi: ExtensionAPI) {
     });
 
     pi.registerCommand("spindle", {
-        description: "Spindle REPL control — reset, config, or prime for orchestration",
+        description: "Spindle REPL control — reset, config, run scripts, or prime for orchestration",
         async handler(args, ctx) {
             const parts = args.trim().split(/\s+/);
             const sub = parts[0]?.toLowerCase();
@@ -242,10 +387,17 @@ export default function spindle(pi: ExtensionAPI) {
                 } else {
                     ctx.ui.notify("Usage: /spindle config subModel <model>", "warning");
                 }
+            } else if (sub === "run") {
+                const filePath = parts.slice(1).join(" ").trim();
+                if (!filePath) {
+                    ctx.ui.notify("Usage: /spindle run <path.js>", "warning");
+                } else {
+                    pi.sendUserMessage(`Execute this script using spindle_exec with the file parameter:\n\nspindle_exec({ file: ${JSON.stringify(filePath)} })`);
+                }
             } else if (sub === "status") {
                 pi.sendUserMessage("Show Spindle status using the spindle_status tool.");
             } else if (!sub || sub === "help") {
-                ctx.ui.notify("Usage: /spindle <reset|config|status|task>", "info");
+                ctx.ui.notify("Usage: /spindle <reset|config|status|run|task>", "info");
             } else {
                 pi.sendUserMessage(`Use Spindle (spindle_exec) for this task with wave-based orchestration:\n\n${args}`);
             }
@@ -255,7 +407,7 @@ export default function spindle(pi: ExtensionAPI) {
 
 export { Repl } from "./repl.js";
 export { createToolWrappers, createFileIO, load, save } from "./tools.js";
-export { spawnSubAgent, discoverAgents, resolveAgent } from "./agents.js";
-export { createThreadSpec, dispatchThreads, parseEpisode, EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
+export { spawnSubAgent, discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
+export { createThreadSpec, dispatchThreads, parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
 export type { Episode, ThreadOptions, ThreadSpec, ThreadState, DisplayItem } from "./threads.js";
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";

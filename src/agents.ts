@@ -26,11 +26,12 @@ export interface UsageStats {
 }
 
 export interface SubAgentEvent {
-    type: "tool_start" | "tool_end" | "text" | "turn";
+    type: "tool_start" | "tool_end" | "text" | "turn" | "episode_chunk";
     toolName?: string;
     toolArgs?: Record<string, unknown>;
     text?: string;
     usage?: UsageStats;
+    episodeRaw?: string;
 }
 
 export interface SubAgentResult {
@@ -50,7 +51,21 @@ export interface SpawnOptions {
     systemPromptSuffix?: string;
     cwd?: string;
     timeout?: number;
+    spindle?: boolean;
+    env?: Record<string, string>;
     onEvent?: (event: SubAgentEvent) => void;
+}
+
+// Set by the extension entry point at registration time so sub-agents
+// can be spawned with `--extension <path>` pointing back at this extension.
+let extensionDir: string | null = null;
+
+export function setExtensionDir(dir: string): void {
+    extensionDir = dir;
+}
+
+export function getExtensionDir(): string | null {
+    return extensionDir;
 }
 
 const activeProcesses = new Set<ChildProcess>();
@@ -164,6 +179,14 @@ export async function spawnSubAgent(
     const tools = options.tools ?? agentConfig?.tools;
     if (tools?.length) args.push("--tools", tools.join(","));
 
+    // Recursive Spindle: give the sub-agent its own Spindle REPL
+    if (options.spindle && extensionDir) {
+        const extPath = path.join(extensionDir, "index.ts");
+        if (fs.existsSync(extPath)) {
+            args.push("--extension", extPath);
+        }
+    }
+
     let tmpDir: string | null = null;
     let tmpFile: string | null = null;
 
@@ -186,6 +209,8 @@ export async function spawnSubAgent(
     let processModel: string | undefined;
     let errorMessage: string | undefined;
     const onEvent = options.onEvent;
+    let emittedEpisodeCount = 0;
+    let accumulatedText = "";
 
     try {
         if (signal?.aborted) throw new Error("Aborted before spawn");
@@ -195,6 +220,7 @@ export async function spawnSubAgent(
                 cwd: options.cwd ?? options.defaultCwd,
                 shell: false,
                 stdio: ["ignore", "pipe", "pipe"],
+                env: options.env ? { ...process.env, ...options.env } : undefined,
             });
             activeProcesses.add(proc);
             let buffer = "";
@@ -233,12 +259,25 @@ export async function spawnSubAgent(
                         if (!processModel && msg.model) processModel = msg.model as string;
                         if (msg.errorMessage) errorMessage = msg.errorMessage as string;
 
-                        // Emit text content and usage
                         for (const part of msg.content) {
                             if (part.type === "text") {
                                 onEvent?.({ type: "text", text: part.text });
+                                accumulatedText += part.text;
                             }
                         }
+
+                        // Detect intermediate <episode> blocks in accumulated text
+                        if (onEvent) {
+                            const allBlocks = [...accumulatedText.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
+                            while (emittedEpisodeCount < allBlocks.length) {
+                                onEvent({
+                                    type: "episode_chunk",
+                                    episodeRaw: allBlocks[emittedEpisodeCount][0],
+                                });
+                                emittedEpisodeCount++;
+                            }
+                        }
+
                         onEvent?.({ type: "turn", usage: { ...usage } });
                     }
                 }
