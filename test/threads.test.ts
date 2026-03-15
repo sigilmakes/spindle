@@ -148,7 +148,7 @@ describe("dispatchThreads", () => {
         expect(results[1].status).toBe("failure");
     });
 
-    it("calls onEpisode callback as threads complete", async () => {
+    it("calls onUpdate callback as threads progress", async () => {
         const { dispatchThreads } = await import("../src/threads.js");
         const ep: Episode = {
             status: "success", summary: "done", findings: [], artifacts: [],
@@ -157,12 +157,14 @@ describe("dispatchThreads", () => {
         };
         const mkGen = () => (async function*() { yield ep; })();
 
-        const calls: number[] = [];
-        await dispatchThreads([mkGen(), mkGen(), mkGen()], 4, (completed) => {
-            calls.push(completed.length);
+        const snapshots: string[][] = [];
+        await dispatchThreads([mkGen(), mkGen(), mkGen()], 4, (states) => {
+            snapshots.push(states.map(s => s.status));
         });
-        expect(calls.length).toBe(3);
-        expect(calls[calls.length - 1]).toBe(3);
+        // Should see initial pending, then running/done transitions
+        expect(snapshots.length).toBeGreaterThanOrEqual(4); // initial + 3 starts + 3 completions (some may merge)
+        const last = snapshots[snapshots.length - 1];
+        expect(last.every(s => s === "done")).toBe(true);
     });
 
     it("handles empty thread list", async () => {

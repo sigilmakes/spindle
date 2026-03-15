@@ -3,10 +3,11 @@ import {
     formatCodeForDisplay,
     formatExecResult,
     formatStatusResult,
+    formatDispatchProgress,
     type SpindleExecDetails,
     type SpindleStatusDetails,
 } from "../src/render.js";
-import type { Episode } from "../src/threads.js";
+import type { Episode, ThreadState } from "../src/threads.js";
 
 const theme = {
     fg: (_color: string, text: string) => text,
@@ -217,5 +218,55 @@ describe("formatStatusResult", () => {
         const text = formatStatusResult(details, theme);
         expect(text).toContain("No variables");
         expect(text).toContain("(default)");
+    });
+});
+
+describe("formatDispatchProgress", () => {
+    function makeState(overrides?: Partial<ThreadState>): ThreadState {
+        return {
+            index: 0, task: "test task", agent: "scout",
+            status: "pending", recentTools: [], toolCount: 0,
+            startTime: 0, durationMs: 0, cost: 0,
+            ...overrides,
+        };
+    }
+
+    it("shows pending threads", () => {
+        const text = formatDispatchProgress([makeState(), makeState({ index: 1 })]);
+        expect(text).toContain("2 threads");
+        expect(text).toContain("0 done");
+        expect(text).toContain("○");
+    });
+
+    it("shows running threads with elapsed time", () => {
+        const text = formatDispatchProgress([
+            makeState({ status: "running", startTime: Date.now() - 5000, agent: "scout" }),
+        ]);
+        expect(text).toContain("1 running");
+        expect(text).toContain("⏳");
+        expect(text).toContain("scout");
+    });
+
+    it("shows done threads with episode summary", () => {
+        const text = formatDispatchProgress([
+            makeState({
+                status: "done", durationMs: 3000, agent: "worker",
+                episode: makeEpisode({ status: "success", summary: "Fixed the bug" }),
+            }),
+        ]);
+        expect(text).toContain("1 done");
+        expect(text).toContain("✓");
+        expect(text).toContain("Fixed the bug");
+    });
+
+    it("shows mixed state", () => {
+        const text = formatDispatchProgress([
+            makeState({ status: "done", durationMs: 2000, episode: makeEpisode() }),
+            makeState({ index: 1, status: "running", startTime: Date.now() - 1000 }),
+            makeState({ index: 2, status: "pending" }),
+        ]);
+        expect(text).toContain("1 done");
+        expect(text).toContain("1 running");
+        expect(text).toContain("1 pending");
     });
 });

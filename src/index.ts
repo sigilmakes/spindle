@@ -4,10 +4,13 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
-import { spawnSubAgent, killAllSubAgents } from "./agents.js";
-import { createThread, dispatchThreads, type Episode, type ThreadOptions } from "./threads.js";
+import { spawnSubAgent, killAllSubAgents, type SubAgentEvent } from "./agents.js";
 import {
-    formatCodeForDisplay, formatExecResult, formatStatusResult,
+    createThread, dispatchThreads,
+    type Episode, type ThreadOptions, type ThreadState, type OnDispatchUpdate,
+} from "./threads.js";
+import {
+    formatCodeForDisplay, formatExecResult, formatStatusResult, formatDispatchProgress,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
 
@@ -18,9 +21,10 @@ export default function spindle(pi: ExtensionAPI) {
 
     const cumulativeUsage = { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 };
 
-    // Per-exec state threaded through to dispatch for onUpdate
+    // Per-exec state — threaded through closures to dispatch/thread calls
     let currentOnUpdate: AgentToolUpdateCallback<SpindleExecDetails> | undefined;
-    let currentCode: string = "";
+    let currentSignal: AbortSignal | undefined;
+    let currentCode = "";
 
     function initRepl(workingDir: string): Repl {
         const r = new Repl();
@@ -37,7 +41,7 @@ export default function spindle(pi: ExtensionAPI) {
                     agent: opts?.agent, model: opts?.model ?? subModel,
                     tools: opts?.tools, timeout: opts?.timeout,
                     defaultCwd: cwd, defaultModel: subModel,
-                });
+                }, currentSignal);
                 cumulativeUsage.totalCost += result.usage.cost;
                 cumulativeUsage.totalLlmCalls++;
                 if (result.error) throw new Error(result.error);
@@ -46,22 +50,40 @@ export default function spindle(pi: ExtensionAPI) {
         });
 
         r.inject({
-            thread: (task: string, opts?: ThreadOptions) =>
-                createThread(task, { ...opts, defaultCwd: cwd, defaultModel: subModel }),
+            thread: (task: string, opts?: ThreadOptions) => {
+                const sig = currentSignal;
+                const threadOnEvent = (event: SubAgentEvent) => {
+                    // Live events from this thread — dispatch tracks these via per-thread state
+                    // (wired through dispatchThreads's onUpdate)
+                };
+                return createThread(
+                    task,
+                    { ...opts, defaultCwd: cwd, defaultModel: subModel },
+                    sig,
+                    threadOnEvent,
+                );
+            },
             dispatch: async (threads: AsyncGenerator<Episode, void, undefined>[], concurrency?: number) => {
-                const onEpisode = (completedSoFar: Episode[]) => {
-                    if (!currentOnUpdate) return;
-                    currentOnUpdate({
-                        content: [{ type: "text", text: `Dispatching: ${completedSoFar.length}/${threads.length} complete` }],
+                const onUpdate = currentOnUpdate;
+                const code = currentCode;
+
+                // Extract thread metadata for display
+                // (threads are opaque generators, but we stored task/agent in createThread)
+
+                const onDispatchUpdate: OnDispatchUpdate = (threadStates: ThreadState[]) => {
+                    if (!onUpdate) return;
+                    onUpdate({
+                        content: [{ type: "text", text: formatDispatchProgress(threadStates) }],
                         details: {
-                            code: currentCode,
-                            episodes: completedSoFar,
+                            code,
+                            episodes: threadStates.filter(t => t.episode).map(t => t.episode!),
+                            durationMs: Math.max(0, ...threadStates.map(t => t.durationMs)),
                             error: false,
                         },
                     });
                 };
 
-                const episodes = await dispatchThreads(threads, concurrency, onEpisode);
+                const episodes = await dispatchThreads(threads, concurrency, onDispatchUpdate);
                 for (const ep of episodes) {
                     cumulativeUsage.totalCost += ep.cost;
                     cumulativeUsage.totalEpisodes++;
@@ -81,7 +103,6 @@ export default function spindle(pi: ExtensionAPI) {
     pi.on("session_start", (_event, ctx) => {
         repl = initRepl(ctx.cwd);
 
-        // P1-T12: Restore sub-model config from session entries
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
             const entry = entries[i] as any;
@@ -120,38 +141,47 @@ export default function spindle(pi: ExtensionAPI) {
 
             (repl as any).__lastEpisodes = undefined;
             currentOnUpdate = onUpdate;
+            currentSignal = signal;
             currentCode = params.code;
 
-            const result = await repl.exec(params.code, signal);
-            const episodes: Episode[] = (repl as any).__lastEpisodes || [];
+            // Kill all subagents on abort
+            const abortCleanup = () => killAllSubAgents();
+            signal?.addEventListener("abort", abortCleanup, { once: true });
 
-            currentOnUpdate = undefined;
+            try {
+                const result = await repl.exec(params.code, signal);
+                const episodes: Episode[] = (repl as any).__lastEpisodes || [];
 
-            const parts: string[] = [];
-            if (result.output) parts.push(result.output);
-            if (result.error) parts.push(`Error: ${result.error}`);
+                const parts: string[] = [];
+                if (result.output) parts.push(result.output);
+                if (result.error) parts.push(`Error: ${result.error}`);
 
-            if (episodes.length > 0) {
-                parts.push("\n--- Episodes ---");
-                for (const ep of episodes) {
-                    let line = `[${ep.status}] ${ep.agent}: ${ep.summary}`;
-                    if (ep.findings.length) line += "\n  Findings:\n" + ep.findings.map(f => `  - ${f}`).join("\n");
-                    if (ep.artifacts.length) line += "\n  Artifacts: " + ep.artifacts.join(", ");
-                    if (ep.blockers.length) line += "\n  Blockers: " + ep.blockers.join(", ");
-                    parts.push(line);
+                if (episodes.length > 0) {
+                    parts.push("\n--- Episodes ---");
+                    for (const ep of episodes) {
+                        let line = `[${ep.status}] ${ep.agent}: ${ep.summary}`;
+                        if (ep.findings.length) line += "\n  Findings:\n" + ep.findings.map(f => `  - ${f}`).join("\n");
+                        if (ep.artifacts.length) line += "\n  Artifacts: " + ep.artifacts.join(", ");
+                        if (ep.blockers.length) line += "\n  Blockers: " + ep.blockers.join(", ");
+                        parts.push(line);
+                    }
                 }
-            }
 
-            return {
-                content: [{ type: "text", text: parts.join("\n") || "(no output)" }],
-                details: {
-                    code: params.code,
-                    episodes: episodes.length > 0 ? episodes : undefined,
-                    durationMs: result.durationMs,
-                    error: !!result.error,
-                } satisfies SpindleExecDetails,
-                isError: !!result.error,
-            };
+                return {
+                    content: [{ type: "text", text: parts.join("\n") || "(no output)" }],
+                    details: {
+                        code: params.code,
+                        episodes: episodes.length > 0 ? episodes : undefined,
+                        durationMs: result.durationMs,
+                        error: !!result.error,
+                    } satisfies SpindleExecDetails,
+                    isError: !!result.error,
+                };
+            } finally {
+                currentOnUpdate = undefined;
+                currentSignal = undefined;
+                signal?.removeEventListener("abort", abortCleanup);
+            }
         },
 
         renderCall(args, theme) {

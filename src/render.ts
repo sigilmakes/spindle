@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { highlightCode, type Theme } from "@mariozechner/pi-coding-agent";
-import type { Episode } from "./threads.js";
+import type { Episode, ThreadState } from "./threads.js";
 
 export interface SpindleExecDetails {
     code: string;
@@ -128,6 +128,42 @@ export function formatStatusResult(details: SpindleStatusDetails, theme: Theme):
     text += `  Sub-model: ${details.config.subModel || "(default)"}\n`;
     text += `  Output limit: ${details.config.outputLimit} chars\n`;
     text += `  Timeout: ${details.config.timeoutMs / 1000}s\n`;
+
+    return text;
+}
+
+export function formatDispatchProgress(threads: ThreadState[]): string {
+    const running = threads.filter(t => t.status === "running");
+    const done = threads.filter(t => t.status === "done");
+    const pending = threads.filter(t => t.status === "pending");
+
+    const elapsed = Math.max(0, ...threads
+        .filter(t => t.startTime > 0)
+        .map(t => t.status === "done" ? t.durationMs : Date.now() - t.startTime));
+
+    let text = `Dispatching ${threads.length} threads: ${done.length} done, ${running.length} running`;
+    if (pending.length > 0) text += `, ${pending.length} pending`;
+    text += ` (${(elapsed / 1000).toFixed(0)}s)`;
+
+    for (const t of threads) {
+        const icon = t.status === "done" ? "✓"
+            : t.status === "running" ? "⏳"
+            : "○";
+        const taskPreview = t.task.length > 50 ? t.task.slice(0, 50) + "..." : t.task;
+        text += `\n  ${icon} ${t.agent}: ${taskPreview}`;
+
+        if (t.status === "running") {
+            const sec = ((Date.now() - t.startTime) / 1000).toFixed(0);
+            text += ` (${sec}s)`;
+            if (t.recentTools.length > 0) {
+                text += ` — ${t.recentTools.slice(-3).join(", ")}`;
+            }
+        } else if (t.status === "done" && t.episode) {
+            const ep = t.episode;
+            text += ` — ${ep.status}`;
+            if (ep.summary) text += `: ${ep.summary.slice(0, 60)}`;
+        }
+    }
 
     return text;
 }

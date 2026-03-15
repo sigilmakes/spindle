@@ -1,4 +1,4 @@
-import { spawnSubAgent, type SpawnOptions, type SubAgentResult } from "./agents.js";
+import { spawnSubAgent, type SubAgentEvent, type SubAgentResult } from "./agents.js";
 
 export interface Episode {
     status: "success" | "failure" | "blocked" | "running";
@@ -97,10 +97,26 @@ export interface ThreadOptions {
     timeout?: number;
 }
 
+export interface ThreadState {
+    index: number;
+    task: string;
+    agent: string;
+    status: "pending" | "running" | "done";
+    recentTools: string[];
+    toolCount: number;
+    startTime: number;
+    durationMs: number;
+    cost: number;
+    episode?: Episode;
+}
+
+export type OnDispatchUpdate = (threads: ThreadState[]) => void;
+
 export function createThread(
     task: string,
     opts: ThreadOptions & { defaultCwd: string; defaultModel?: string },
     signal?: AbortSignal,
+    onEvent?: (event: SubAgentEvent) => void,
 ): AsyncGenerator<Episode, void, undefined> {
     return (async function* () {
         const result = await spawnSubAgent(
@@ -109,6 +125,7 @@ export function createThread(
                 agent: opts.agent, model: opts.model, tools: opts.tools, timeout: opts.timeout,
                 systemPromptSuffix: EPISODE_SUFFIX,
                 defaultCwd: opts.defaultCwd, defaultModel: opts.defaultModel,
+                onEvent,
             },
             signal,
         );
@@ -116,36 +133,57 @@ export function createThread(
     })();
 }
 
-export type OnEpisodeCallback = (completedSoFar: Episode[]) => void;
-
 export async function dispatchThreads(
     threads: AsyncGenerator<Episode, void, undefined>[],
     concurrency: number = DEFAULT_CONCURRENCY,
-    onEpisode?: OnEpisodeCallback,
+    onUpdate?: OnDispatchUpdate,
+    threadMeta?: Array<{ task: string; agent: string }>,
 ): Promise<Episode[]> {
     const limit = Math.max(1, Math.min(concurrency, MAX_CONCURRENCY));
     const results: Episode[] = new Array(threads.length);
     let nextIndex = 0;
+
+    const states: ThreadState[] = threads.map((_, i) => ({
+        index: i,
+        task: threadMeta?.[i]?.task ?? `thread-${i}`,
+        agent: threadMeta?.[i]?.agent ?? "anonymous",
+        status: "pending",
+        recentTools: [],
+        toolCount: 0,
+        startTime: 0,
+        durationMs: 0,
+        cost: 0,
+    }));
+
+    const emit = () => onUpdate?.(states);
+    emit();
 
     const workers = Array.from({ length: Math.min(limit, threads.length) }, async () => {
         while (true) {
             const current = nextIndex++;
             if (current >= threads.length) return;
 
+            states[current].status = "running";
+            states[current].startTime = Date.now();
+            emit();
+
             const episodes: Episode[] = [];
             for await (const ep of threads[current]) episodes.push(ep);
 
-            results[current] = episodes[0] || {
+            const episode = episodes[0] || {
                 status: "failure" as const,
                 summary: "Thread produced no episodes",
                 findings: [], artifacts: [], blockers: [],
-                toolCalls: 0, raw: "", task: "unknown", agent: "unknown",
+                toolCalls: 0, raw: "", task: states[current].task, agent: states[current].agent,
                 model: "unknown", cost: 0, duration: 0,
             };
 
-            if (onEpisode) {
-                onEpisode(results.filter(Boolean));
-            }
+            results[current] = episode;
+            states[current].status = "done";
+            states[current].durationMs = Date.now() - states[current].startTime;
+            states[current].cost = episode.cost;
+            states[current].episode = episode;
+            emit();
         }
     });
 

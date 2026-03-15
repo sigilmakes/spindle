@@ -25,6 +25,14 @@ export interface UsageStats {
     turns: number;
 }
 
+export interface SubAgentEvent {
+    type: "tool_start" | "tool_end" | "text" | "turn";
+    toolName?: string;
+    toolArgs?: Record<string, unknown>;
+    text?: string;
+    usage?: UsageStats;
+}
+
 export interface SubAgentResult {
     text: string;
     messages: Message[];
@@ -42,6 +50,7 @@ export interface SpawnOptions {
     systemPromptSuffix?: string;
     cwd?: string;
     timeout?: number;
+    onEvent?: (event: SubAgentEvent) => void;
 }
 
 const activeProcesses = new Set<ChildProcess>();
@@ -176,6 +185,7 @@ export async function spawnSubAgent(
     let stderr = "";
     let processModel: string | undefined;
     let errorMessage: string | undefined;
+    const onEvent = options.onEvent;
 
     try {
         if (signal?.aborted) throw new Error("Aborted before spawn");
@@ -194,6 +204,18 @@ export async function spawnSubAgent(
                 let event: Record<string, unknown>;
                 try { event = JSON.parse(line); } catch { return; }
 
+                if (event.type === "tool_execution_start") {
+                    onEvent?.({
+                        type: "tool_start",
+                        toolName: event.toolName as string,
+                        toolArgs: event.args as Record<string, unknown>,
+                    });
+                }
+
+                if (event.type === "tool_execution_end") {
+                    onEvent?.({ type: "tool_end", toolName: event.toolName as string });
+                }
+
                 if (event.type === "message_end" && event.message) {
                     const msg = event.message as Message;
                     messages.push(msg);
@@ -210,6 +232,14 @@ export async function spawnSubAgent(
                         }
                         if (!processModel && msg.model) processModel = msg.model as string;
                         if (msg.errorMessage) errorMessage = msg.errorMessage as string;
+
+                        // Emit text content and usage
+                        for (const part of msg.content) {
+                            if (part.type === "text") {
+                                onEvent?.({ type: "text", text: part.text });
+                            }
+                        }
+                        onEvent?.({ type: "turn", usage: { ...usage } });
                     }
                 }
 
