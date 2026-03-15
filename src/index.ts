@@ -30,12 +30,16 @@ export const DEFAULT_LLM_MAX_OUTPUT = 50 * 1024; // 50KB
  * If `max` is `false` or `Infinity`, no truncation is applied.
  * Returns the original string when it fits within the limit.
  */
+/** Minimum maxOutput to prevent accidental data destruction. */
+export const MIN_LLM_MAX_OUTPUT = 1024;
+
 export function truncateLlmOutput(
     text: string,
     max: number | false | undefined,
     defaultMax: number = DEFAULT_LLM_MAX_OUTPUT,
 ): string {
-    const limit = max === false ? Infinity : (max ?? defaultMax);
+    const raw = max === false ? Infinity : (max ?? defaultMax);
+    const limit = Number.isFinite(raw) ? Math.max(raw, MIN_LLM_MAX_OUTPUT) : raw;
     if (!Number.isFinite(limit) || text.length <= limit) return text;
     const headSize = Math.floor(limit * 0.7);
     const tailSize = Math.floor(limit * 0.3);
@@ -308,8 +312,10 @@ export default function spindle(pi: ExtensionAPI) {
             "**Guard your context window.** Prefer `load()` over `read()` — load stores data in a variable without outputting it. Use `grep`, `bash` with `awk`/`jq`/`head`/`tail` to extract what you need. Only `console.log` the specific lines or values you need to see — never dump entire files or large generated content.",
             "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout?, spindle? })` → string.",
             "llm() output is capped at 50KB by default. Use `{ maxOutput: false }` for full output, or `{ maxOutput: N }` for a custom byte limit.",
+            "llm() truncation is destructive — the returned string itself is cut. If you see `[truncated]` in the result, call llm() again with a higher maxOutput.",
             "Threads: `thread(task, opts?)` → AsyncGenerator<Episode>. `await dispatch([thread(...), ...])` → Episode[].",
             "Episodes have: status, summary, findings, artifacts, blockers, cost, duration.",
+            "Episode.raw has the agent's full text output (up to 50KB). Use `ep.raw` when you need the actual content, not just the summary.",
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
             "Recursive Spindle: pass `{ spindle: true }` to `thread()` or `llm()` to give the sub-agent its own Spindle REPL — it can dispatch its own threads.",
             "Thread communication: `dispatch([...], { communicate: true })` lets threads send/recv/broadcast to each other by rank during execution.",

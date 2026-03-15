@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { truncateLlmOutput, DEFAULT_LLM_MAX_OUTPUT } from "../src/index.js";
+import { truncateLlmOutput, DEFAULT_LLM_MAX_OUTPUT, MIN_LLM_MAX_OUTPUT } from "../src/index.js";
 
 describe("truncateLlmOutput", () => {
     it("passes through short text unchanged", () => {
@@ -33,14 +33,24 @@ describe("truncateLlmOutput", () => {
     });
 
     it("respects a custom maxOutput number", () => {
-        const text = "x".repeat(500);
-        const result = truncateLlmOutput(text, 200);
+        // Must exceed MIN_LLM_MAX_OUTPUT to actually set the limit
+        const limit = MIN_LLM_MAX_OUTPUT + 500;
+        const text = "x".repeat(limit + 1000);
+        const result = truncateLlmOutput(text, limit);
         expect(result).toContain("truncated");
-        // Head should be ~140 chars (70% of 200), tail ~60 chars (30% of 200)
-        const headSize = Math.floor(200 * 0.7);
-        const tailSize = Math.floor(200 * 0.3);
+        const headSize = Math.floor(limit * 0.7);
+        const tailSize = Math.floor(limit * 0.3);
         expect(result).toContain(`first ${headSize}`);
         expect(result).toContain(`last ${tailSize}`);
+    });
+
+    it("floors maxOutput at MIN_LLM_MAX_OUTPUT", () => {
+        const text = "x".repeat(MIN_LLM_MAX_OUTPUT + 500);
+        // Requesting 50 should floor to MIN_LLM_MAX_OUTPUT
+        const result = truncateLlmOutput(text, 50);
+        expect(result).toContain("truncated");
+        const headSize = Math.floor(MIN_LLM_MAX_OUTPUT * 0.7);
+        expect(result).toContain(`first ${headSize}`);
     });
 
     it("returns full text when maxOutput is false (opt-out)", () => {
@@ -57,13 +67,13 @@ describe("truncateLlmOutput", () => {
     });
 
     it("uses defaultMax parameter when max is undefined", () => {
-        const text = "x".repeat(200);
-        // With a custom defaultMax of 100, text should be truncated
-        const result = truncateLlmOutput(text, undefined, 100);
+        // defaultMax is also floored at MIN_LLM_MAX_OUTPUT
+        const text = "x".repeat(MIN_LLM_MAX_OUTPUT + 500);
+        const result = truncateLlmOutput(text, undefined, MIN_LLM_MAX_OUTPUT + 100);
         expect(result).toContain("truncated");
 
-        // With a custom defaultMax of 300, text should pass through
-        const result2 = truncateLlmOutput(text, undefined, 300);
+        // With defaultMax larger than text, passes through
+        const result2 = truncateLlmOutput(text, undefined, MIN_LLM_MAX_OUTPUT + 1000);
         expect(result2).toBe(text);
     });
 
@@ -74,13 +84,12 @@ describe("truncateLlmOutput", () => {
     });
 
     it("head+tail do not overlap for reasonable limits", () => {
-        const text = "x".repeat(1000);
-        const result = truncateLlmOutput(text, 100);
-        const headSize = Math.floor(100 * 0.7); // 70
-        const tailSize = Math.floor(100 * 0.3); // 30
-        // Head portion should be first 70 chars of original
+        const limit = MIN_LLM_MAX_OUTPUT + 500;
+        const text = "x".repeat(limit + 1000);
+        const result = truncateLlmOutput(text, limit);
+        const headSize = Math.floor(limit * 0.7);
+        const tailSize = Math.floor(limit * 0.3);
         expect(result.startsWith("x".repeat(headSize))).toBe(true);
-        // Tail portion should be last 30 chars of original
         expect(result.endsWith("x".repeat(tailSize))).toBe(true);
     });
 
@@ -89,8 +98,8 @@ describe("truncateLlmOutput", () => {
     });
 
     it("truncation marker includes total char count", () => {
-        const text = "a".repeat(100);
-        const result = truncateLlmOutput(text, 50);
-        expect(result).toContain("100 total chars");
+        const text = "a".repeat(MIN_LLM_MAX_OUTPUT + 500);
+        const result = truncateLlmOutput(text, MIN_LLM_MAX_OUTPUT + 100);
+        expect(result).toContain(`${text.length} total chars`);
     });
 });
