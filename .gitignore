@@ -4,7 +4,6 @@ dist/
 *.sock
 .env
 ARCHITECTURE.md
-ARCHITECTURE_DIAGRAM.txt
-*.md
+ARCHITECTURE_DIAGRAM.tx
 !README.md
 !docs/*.md
