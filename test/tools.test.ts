@@ -6,6 +6,7 @@ import {
     load, save, createFileIO,
     FileConflictError, guardedWrite,
     createMtimeGuardedEditOperations, getMtimeMap,
+    createToolWrappers, ToolResult,
 } from "../src/tools.js";
 import { acquireLock, releaseLock, checkLock, FileLockError } from "../src/locks.js";
 
@@ -368,5 +369,110 @@ describe("file locking integration", () => {
 
         // Lock should still be released
         expect(checkLock(f)).toBeNull();
+    });
+});
+
+describe("ToolResult", () => {
+    it("success creates ok result", () => {
+        const r = ToolResult.success("hello");
+        expect(r.output).toBe("hello");
+        expect(r.error).toBe("");
+        expect(r.ok).toBe(true);
+        expect(r.exitCode).toBe(0);
+    });
+
+    it("fail creates error result", () => {
+        const r = ToolResult.fail("something broke");
+        expect(r.output).toBe("");
+        expect(r.error).toBe("something broke");
+        expect(r.ok).toBe(false);
+        expect(r.exitCode).toBe(1);
+    });
+
+    it("fail preserves output", () => {
+        const r = ToolResult.fail("partial error", "some output");
+        expect(r.output).toBe("some output");
+        expect(r.error).toBe("partial error");
+        expect(r.ok).toBe(false);
+    });
+
+    it("toString returns output", () => {
+        const r = ToolResult.success("file content");
+        expect(`${r}`).toBe("file content");
+        expect(String(r)).toBe("file content");
+    });
+
+    it("toJSON returns output", () => {
+        const r = ToolResult.success("data");
+        expect(JSON.stringify(r)).toBe('"data"');
+    });
+});
+
+describe("tool wrappers return ToolResult", () => {
+    let tmp: string;
+    let wrappers: ReturnType<typeof createToolWrappers>;
+    beforeEach(() => {
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-wrappers-"));
+        wrappers = createToolWrappers(tmp);
+    });
+    afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+    it("bash returns ToolResult with stdout", async () => {
+        const r = await wrappers.bash({ command: "echo hello" });
+        expect(r).toBeInstanceOf(ToolResult);
+        expect(r.ok).toBe(true);
+        expect(r.output.trim()).toBe("hello");
+        expect(r.exitCode).toBe(0);
+    });
+
+    it("bash returns ToolResult on failure without throwing", async () => {
+        const r = await wrappers.bash({ command: "exit 42" });
+        expect(r).toBeInstanceOf(ToolResult);
+        expect(r.ok).toBe(false);
+        expect(r.exitCode).toBe(42);
+    });
+
+    it("bash captures stderr separately", async () => {
+        const r = await wrappers.bash({ command: "echo out; echo err >&2" });
+        expect(r.output.trim()).toBe("out");
+        expect(r.error.trim()).toBe("err");
+    });
+
+    it("read returns ToolResult", async () => {
+        fs.writeFileSync(path.join(tmp, "test.txt"), "content");
+        const r = await wrappers.read({ path: "test.txt" });
+        expect(r).toBeInstanceOf(ToolResult);
+        expect(r.ok).toBe(true);
+        expect(r.output).toContain("content");
+    });
+
+    it("read returns error ToolResult for missing file", async () => {
+        const r = await wrappers.read({ path: "nope.txt" });
+        expect(r).toBeInstanceOf(ToolResult);
+        expect(r.ok).toBe(false);
+        expect(r.error).toContain("nope.txt");
+    });
+
+    it("edit returns ToolResult", async () => {
+        fs.writeFileSync(path.join(tmp, "e.txt"), "old text");
+        const r = await wrappers.edit({ path: "e.txt", oldText: "old", newText: "new" });
+        expect(r).toBeInstanceOf(ToolResult);
+        expect(r.ok).toBe(true);
+        expect(fs.readFileSync(path.join(tmp, "e.txt"), "utf-8")).toBe("new text");
+    });
+
+    it("edit returns error ToolResult on mismatch", async () => {
+        fs.writeFileSync(path.join(tmp, "e2.txt"), "actual content");
+        const r = await wrappers.edit({ path: "e2.txt", oldText: "nonexistent", newText: "new" });
+        expect(r).toBeInstanceOf(ToolResult);
+        expect(r.ok).toBe(false);
+        expect(r.error.length).toBeGreaterThan(0);
+    });
+
+    it("write returns ToolResult", async () => {
+        const r = await wrappers.write({ path: "w.txt", content: "written" });
+        expect(r).toBeInstanceOf(ToolResult);
+        expect(r.ok).toBe(true);
+        expect(fs.readFileSync(path.join(tmp, "w.txt"), "utf-8")).toBe("written");
     });
 });

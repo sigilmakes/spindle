@@ -301,6 +301,7 @@ export default function spindle(pi: ExtensionAPI) {
             "**Use `spindle_exec` for everything.** Do not call native tools (read, edit, write, bash, grep, find, ls) directly — use their REPL equivalents inside `spindle_exec`. The REPL has file locking, persistent variables, and all the same tools as builtins.",
             "Variables persist across `spindle_exec` calls (use plain assignment, not const/let).",
             "Built-in tools: `await read({path})`, `await bash({command})`, `await grep({pattern, path})`, `await find({pattern, path})`, `await edit({path, oldText, newText})`, `await write({path, content})`, `await ls({path})`.",
+            "  All return `ToolResult { output, error, ok, exitCode }`. Never throw — check `.ok` for success. Coerce to string with `${result}` or use `.output` directly.",
             "  These have pi's truncation limits (50KB/2000 lines) — use `load()` for full file content.",
             "`await load(path)` loads a file (→ string) or directory (→ Map) into a variable without entering context.",
             "`await save(path, content)` writes data out without entering context.",

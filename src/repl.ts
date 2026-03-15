@@ -144,6 +144,15 @@ function formatValue(value: unknown): string {
     if (typeof value === "string") return value;
     if (typeof value === "number" || typeof value === "boolean") return String(value);
     if (value instanceof Error) return value.message;
+    // ToolResult: show output, plus error/exitCode if notable
+    if (value && typeof value === "object" && "output" in value && "ok" in value && "error" in value) {
+        const r = value as { output: string; error: string; ok: boolean; exitCode: number };
+        if (r.ok) return r.output || "(no output)";
+        let out = r.output;
+        if (r.error) out += (out && !out.endsWith("\n") ? "\n" : "") + r.error;
+        if (r.exitCode !== 0) out += (out && !out.endsWith("\n") ? "\n" : "") + `[exit code ${r.exitCode}]`;
+        return out || "(no output)";
+    }
     if (value instanceof Map) {
         const entries = Array.from(value.entries()).slice(0, 10)
             .map(([k, v]) => `${String(k)} => ${previewValue(v)}`);
