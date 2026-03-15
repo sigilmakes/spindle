@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createAllTools } from "@mariozechner/pi-coding-agent";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-
+import {
+    createReadTool, createBashTool, createEditTool, createWriteTool,
+    createGrepTool, createFindTool, createLsTool,
+} from "@mariozechner/pi-coding-agent";
 const DEFAULT_MAX_LOAD_SIZE = 10 * 1024 * 1024;
 
 const SKIP_DIRS = new Set([
@@ -20,17 +21,23 @@ function extractText(result: { content: Array<{ type: string; text?: string }> }
 export type ToolWrappers = Record<string, (args: Record<string, unknown>) => Promise<string>>;
 
 export function createToolWrappers(cwd: string): ToolWrappers {
-    const tools = createAllTools(cwd);
-    const wrappers: ToolWrappers = {};
+    const tools: Record<string, any> = {
+        read: createReadTool(cwd),
+        bash: createBashTool(cwd),
+        edit: createEditTool(cwd),
+        write: createWriteTool(cwd),
+        grep: createGrepTool(cwd),
+        find: createFindTool(cwd),
+        ls: createLsTool(cwd),
+    };
 
+    const wrappers: ToolWrappers = {};
     for (const [name, tool] of Object.entries(tools)) {
-        const t = tool as AgentTool;
         wrappers[name] = async (args: Record<string, unknown>) => {
-            const result = await t.execute(`spindle-${name}-${Date.now()}`, args);
+            const result = await tool.execute(`spindle-${name}-${Date.now()}`, args);
             return extractText(result);
         };
     }
-
     return wrappers;
 }
 
@@ -77,7 +84,7 @@ export async function load(
                         if (totalSize + s.size > maxSize) return;
                         files.set(relPath, fs.readFileSync(fullPath, "utf-8"));
                         totalSize += s.size;
-                    } catch { /* skip unreadable files */ }
+                    } catch { /* skip unreadable */ }
                 }
             }
         }

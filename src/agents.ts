@@ -199,7 +199,7 @@ export async function spawnSubAgent(
                     messages.push(msg);
                     if (msg.role === "assistant") {
                         usage.turns++;
-                        const u = msg.usage as Record<string, unknown> | undefined;
+                        const u = msg.usage as unknown as Record<string, unknown> | undefined;
                         if (u) {
                             usage.input += (u.input as number) || 0;
                             usage.output += (u.output as number) || 0;

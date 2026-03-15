@@ -1,3 +1,4 @@
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { AgentToolUpdateCallback, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -158,7 +159,7 @@ export default function spindle(pi: ExtensionAPI) {
         },
 
         renderResult(result, options, theme) {
-            return new Text(formatExecResult(result, options.expanded, theme), 0, 0);
+            return new Text(formatExecResult(result as AgentToolResult<SpindleExecDetails>, options.expanded, theme), 0, 0);
         },
     });
 

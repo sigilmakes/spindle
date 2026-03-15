@@ -116,9 +116,12 @@ export function createThread(
     })();
 }
 
+export type OnEpisodeCallback = (completedSoFar: Episode[]) => void;
+
 export async function dispatchThreads(
     threads: AsyncGenerator<Episode, void, undefined>[],
     concurrency: number = DEFAULT_CONCURRENCY,
+    onEpisode?: OnEpisodeCallback,
 ): Promise<Episode[]> {
     const limit = Math.max(1, Math.min(concurrency, MAX_CONCURRENCY));
     const results: Episode[] = new Array(threads.length);
@@ -139,6 +142,10 @@ export async function dispatchThreads(
                 toolCalls: 0, raw: "", task: "unknown", agent: "unknown",
                 model: "unknown", cost: 0, duration: 0,
             };
+
+            if (onEpisode) {
+                onEpisode(results.filter(Boolean));
+            }
         }
     });
 

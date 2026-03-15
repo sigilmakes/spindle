@@ -124,3 +124,59 @@ describe("EPISODE_SUFFIX", () => {
         expect(EPISODE_SUFFIX).toContain("blockers:");
     });
 });
+
+describe("dispatchThreads", () => {
+    it("drains generators and returns episodes in input order", async () => {
+        const { dispatchThreads } = await import("../src/threads.js");
+        const mkGen = (ep: Episode) => (async function*() { yield ep; })();
+
+        const epA: Episode = {
+            status: "success", summary: "A", findings: [], artifacts: [],
+            blockers: [], toolCalls: 1, raw: "", task: "a", agent: "s",
+            model: "m", cost: 0.01, duration: 100,
+        };
+        const epB: Episode = {
+            status: "failure", summary: "B", findings: ["f1"], artifacts: [],
+            blockers: [], toolCalls: 2, raw: "", task: "b", agent: "w",
+            model: "m", cost: 0.02, duration: 200,
+        };
+
+        const results = await dispatchThreads([mkGen(epA), mkGen(epB)]);
+        expect(results).toHaveLength(2);
+        expect(results[0].summary).toBe("A");
+        expect(results[1].summary).toBe("B");
+        expect(results[1].status).toBe("failure");
+    });
+
+    it("calls onEpisode callback as threads complete", async () => {
+        const { dispatchThreads } = await import("../src/threads.js");
+        const ep: Episode = {
+            status: "success", summary: "done", findings: [], artifacts: [],
+            blockers: [], toolCalls: 0, raw: "", task: "t", agent: "a",
+            model: "m", cost: 0, duration: 0,
+        };
+        const mkGen = () => (async function*() { yield ep; })();
+
+        const calls: number[] = [];
+        await dispatchThreads([mkGen(), mkGen(), mkGen()], 4, (completed) => {
+            calls.push(completed.length);
+        });
+        expect(calls.length).toBe(3);
+        expect(calls[calls.length - 1]).toBe(3);
+    });
+
+    it("handles empty thread list", async () => {
+        const { dispatchThreads } = await import("../src/threads.js");
+        const results = await dispatchThreads([]);
+        expect(results).toEqual([]);
+    });
+
+    it("provides fallback episode when generator yields nothing", async () => {
+        const { dispatchThreads } = await import("../src/threads.js");
+        const emptyGen = (async function*(): AsyncGenerator<Episode, void, undefined> {})();
+        const results = await dispatchThreads([emptyGen]);
+        expect(results).toHaveLength(1);
+        expect(results[0].status).toBe("failure");
+        expect(results[0].summary).toContain("no episodes");
+    });
+});
