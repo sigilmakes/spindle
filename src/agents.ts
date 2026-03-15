@@ -50,7 +50,20 @@ export interface SpawnOptions {
     systemPromptSuffix?: string;
     cwd?: string;
     timeout?: number;
+    spindle?: boolean;
     onEvent?: (event: SubAgentEvent) => void;
+}
+
+// Set by the extension entry point at registration time so sub-agents
+// can be spawned with `--extension <path>` pointing back at this extension.
+let extensionDir: string | null = null;
+
+export function setExtensionDir(dir: string): void {
+    extensionDir = dir;
+}
+
+export function getExtensionDir(): string | null {
+    return extensionDir;
 }
 
 const activeProcesses = new Set<ChildProcess>();
@@ -163,6 +176,14 @@ export async function spawnSubAgent(
 
     const tools = options.tools ?? agentConfig?.tools;
     if (tools?.length) args.push("--tools", tools.join(","));
+
+    // Recursive Spindle: give the sub-agent its own Spindle REPL
+    if (options.spindle && extensionDir) {
+        const extPath = path.join(extensionDir, "index.ts");
+        if (fs.existsSync(extPath)) {
+            args.push("--extension", extPath);
+        }
+    }
 
     let tmpDir: string | null = null;
     let tmpFile: string | null = null;

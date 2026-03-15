@@ -60,6 +60,7 @@ export interface ThreadOptions {
     model?: string;
     tools?: string[];
     timeout?: number;
+    spindle?: boolean;
 }
 
 export interface ThreadSpec {
@@ -229,7 +230,6 @@ export async function dispatchThreads(
                     systemPromptSuffix: EPISODE_SUFFIX,
                     defaultCwd: spec.opts.defaultCwd,
                     defaultModel: spec.opts.defaultModel,
-                    onEvent,
                 },
                 signal ?? spec.signal,
             );

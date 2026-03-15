@@ -1,12 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { AgentToolUpdateCallback, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
-import { spawnSubAgent, killAllSubAgents } from "./agents.js";
+import { spawnSubAgent, killAllSubAgents, setExtensionDir } from "./agents.js";
 import {
     createThreadSpec, dispatchThreads, isThreadSpec,
     type Episode, type ThreadOptions, type ThreadSpec, type ThreadState,
@@ -15,6 +16,17 @@ import {
     formatCodeForDisplay, formatFileExecForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
+
+// Register the extension directory so sub-agents can be spawned with --extension
+// pointing back at this extension's source entry point.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// If running from dist/, resolve to the source src/ directory.
+// If already in src/ (jiti), use as-is.
+const srcDir = __dirname.endsWith("/dist") || __dirname.endsWith("\\dist")
+    ? path.join(path.dirname(__dirname), "src")
+    : __dirname;
+setExtensionDir(srcDir);
 
 export default function spindle(pi: ExtensionAPI) {
     let repl: Repl | null = null;
@@ -38,10 +50,11 @@ export default function spindle(pi: ExtensionAPI) {
         r.inject({ load: fileIO.load, save: fileIO.save });
 
         r.inject({
-            llm: async (prompt: string, opts?: { agent?: string; model?: string; tools?: string[]; timeout?: number }) => {
+            llm: async (prompt: string, opts?: { agent?: string; model?: string; tools?: string[]; timeout?: number; spindle?: boolean }) => {
                 const result = await spawnSubAgent(prompt, {
                     agent: opts?.agent, model: opts?.model ?? subModel,
                     tools: opts?.tools, timeout: opts?.timeout,
+                    spindle: opts?.spindle,
                     defaultCwd: cwd, defaultModel: subModel,
                 }, currentSignal);
                 cumulativeUsage.totalCost += result.usage.cost;
@@ -122,10 +135,11 @@ export default function spindle(pi: ExtensionAPI) {
             "  These have pi's truncation limits — use `load()` for full file content.",
             "`await load(path)` loads a file (→ string) or directory (→ Map) into a variable without entering context.",
             "`await save(path, content)` writes data out without entering context.",
-            "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout? })` → string.",
+            "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout?, spindle? })` → string.",
             "Threads: `thread(task, opts?)` → AsyncGenerator<Episode>. `await dispatch([thread(...), ...])` → Episode[].",
             "Episodes have: status, summary, findings, artifacts, blockers, cost, duration.",
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
+            "Recursive Spindle: pass `{ spindle: true }` to `thread()` or `llm()` to give the sub-agent its own Spindle REPL — it can dispatch its own threads.",
             "`await sleep(ms)` for delays.",
             "REPL output truncated to 8192 chars. Store results in variables, console.log what you need.",
             "Execute scripts from files: `spindle_exec({ file: \"path/to/script.js\" })` — runs a .js/.mjs file in the same REPL context with all the same builtins.",
@@ -315,7 +329,7 @@ export default function spindle(pi: ExtensionAPI) {
 
 export { Repl } from "./repl.js";
 export { createToolWrappers, createFileIO, load, save } from "./tools.js";
-export { spawnSubAgent, discoverAgents, resolveAgent } from "./agents.js";
+export { spawnSubAgent, discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
 export { createThreadSpec, dispatchThreads, parseEpisode, EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
 export type { Episode, ThreadOptions, ThreadSpec, ThreadState, DisplayItem } from "./threads.js";
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";
