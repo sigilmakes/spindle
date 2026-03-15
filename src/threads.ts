@@ -67,6 +67,23 @@ blockers:
 
 const COLLAPSED_ITEM_COUNT = 10;
 
+/** Maximum size for episode.raw (50KB). */
+export const MAX_RAW_SIZE = 50 * 1024;
+
+/**
+ * Truncate raw text with head+tail preservation.
+ * The 70/30 split keeps context at the start (where the agent describes
+ * what it did) and the episode block at the end.
+ */
+export function truncateRaw(text: string, max: number = MAX_RAW_SIZE): string {
+    if (text.length <= max) return text;
+    const headSize = Math.floor(max * 0.7);
+    const tailSize = max - headSize;
+    const head = text.slice(0, headSize);
+    const tail = text.slice(-tailSize);
+    return head + `\n\n... [truncated: ${text.length} chars, showing first ${head.length} + last ${tail.length}] ...\n\n` + tail;
+}
+
 export type DisplayItem =
     | { type: "text"; text: string }
     | { type: "toolCall"; name: string; args: Record<string, unknown>; done: boolean }
@@ -492,9 +509,12 @@ export function parseEpisode(result: SubAgentResult, meta: { task: string; agent
     const allMatches = [...raw.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
     const match = allMatches.length > 0 ? allMatches[allMatches.length - 1] : null;
 
+    // Truncate raw AFTER parsing (parsing needs full text to find the episode block)
+    const truncatedRaw = truncateRaw(raw);
+
     const base = {
         toolCalls: countToolCalls(result),
-        raw,
+        raw: truncatedRaw,
         task: meta.task,
         agent: meta.agent,
         model: result.model || "unknown",

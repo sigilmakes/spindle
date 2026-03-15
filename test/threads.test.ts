@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, createThreadSpec, dispatchThreads, isThreadSpec } from "../src/threads.js";
+import { parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, createThreadSpec, dispatchThreads, isThreadSpec, truncateRaw, MAX_RAW_SIZE } from "../src/threads.js";
 import type { Episode, ThreadState, ThreadSpec } from "../src/threads.js";
 import type { SubAgentResult } from "../src/agents.js";
+import { pruneMessages } from "../src/agents.js";
 
 function makeResult(text: string, overrides?: Partial<SubAgentResult>): SubAgentResult {
     return {
@@ -240,5 +241,187 @@ describe("dispatchThreads", () => {
         // Empty dispatch returns immediately — no updates
         await dispatchThreads([], 4, onUpdate);
         expect(snapshots).toHaveLength(0);
+    });
+});
+
+// --- W1C: truncateRaw ---
+
+describe("truncateRaw", () => {
+    it("preserves short text unchanged", () => {
+        const short = "Hello, world!";
+        expect(truncateRaw(short)).toBe(short);
+    });
+
+    it("preserves text exactly at the limit", () => {
+        const exact = "x".repeat(MAX_RAW_SIZE);
+        expect(truncateRaw(exact)).toBe(exact);
+    });
+
+    it("truncates text over the limit with head+tail", () => {
+        const big = "A".repeat(100_000);
+        const result = truncateRaw(big);
+        expect(result.length).toBeLessThan(big.length);
+        expect(result).toContain("... [truncated:");
+        expect(result).toContain("100000 chars");
+    });
+
+    it("uses 70/30 head/tail split", () => {
+        const max = 1000;
+        const big = "B".repeat(5000);
+        const result = truncateRaw(big, max);
+        const headSize = Math.floor(max * 0.7); // 700
+        const tailSize = max - headSize;         // 300
+        // Head portion should start the result
+        expect(result.startsWith("B".repeat(headSize))).toBe(true);
+        // Tail portion should end the result
+        expect(result.endsWith("B".repeat(tailSize))).toBe(true);
+        // Marker in the middle
+        expect(result).toContain(`showing first ${headSize} + last ${tailSize}`);
+    });
+
+    it("preserves episode block in tail of large text", () => {
+        const episodeBlock = "\n<episode>\nstatus: success\nsummary: Finished the work.\nfindings:\n- Found it\nartifacts:\nblockers:\n</episode>";
+        // Build a large text with the episode block at the very end
+        const padding = "x".repeat(100_000);
+        const big = padding + episodeBlock;
+        const result = truncateRaw(big);
+        // The episode block is near the end, within the 30% tail
+        expect(result).toContain("<episode>");
+        expect(result).toContain("Finished the work.");
+        expect(result).toContain("</episode>");
+    });
+
+    it("respects custom max parameter", () => {
+        const text = "C".repeat(500);
+        // With max=200, it should truncate
+        const result = truncateRaw(text, 200);
+        expect(result).toContain("[truncated:");
+        // With max=1000, it should pass through
+        expect(truncateRaw(text, 1000)).toBe(text);
+    });
+});
+
+describe("parseEpisode with large output (W1C)", () => {
+    it("truncates raw on large output", () => {
+        const episodeBlock = "\n<episode>\nstatus: success\nsummary: Done.\nfindings:\n- Result\nartifacts:\nblockers:\n</episode>";
+        const padding = "x".repeat(100_000);
+        const text = padding + episodeBlock;
+        const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
+        // raw should be truncated to roughly MAX_RAW_SIZE + marker overhead
+        expect(ep.raw.length).toBeLessThan(MAX_RAW_SIZE + 200);
+        expect(ep.raw).toContain("[truncated:");
+    });
+
+    it("still parses episode fields from large text", () => {
+        const episodeBlock = "\n<episode>\nstatus: success\nsummary: Completed analysis.\nfindings:\n- Found vulnerability\nartifacts:\n- src/fix.ts\nblockers:\n</episode>";
+        const padding = "y".repeat(100_000);
+        const text = padding + episodeBlock;
+        const ep = parseEpisode(makeResult(text), { task: "audit", agent: "scout" });
+        // Parsing happens on full text before truncation
+        expect(ep.status).toBe("success");
+        expect(ep.summary).toBe("Completed analysis.");
+        expect(ep.findings).toEqual(["Found vulnerability"]);
+        expect(ep.artifacts).toEqual(["src/fix.ts"]);
+    });
+
+    it("does not truncate small output", () => {
+        const text = "short\n<episode>\nstatus: success\nsummary: ok\nfindings:\nartifacts:\nblockers:\n</episode>";
+        const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
+        expect(ep.raw).toBe(text);
+        expect(ep.raw).not.toContain("[truncated:");
+    });
+});
+
+// --- W1C: pruneMessages ---
+
+describe("pruneMessages", () => {
+    it("returns empty array for empty input", () => {
+        expect(pruneMessages([])).toEqual([]);
+    });
+
+    it("preserves last assistant message intact", () => {
+        const largeText = "x".repeat(10_000);
+        const messages: any[] = [
+            { role: "assistant", content: [{ type: "text", text: largeText }], timestamp: 1 },
+        ];
+        const pruned = pruneMessages(messages);
+        expect(pruned[0].content[0].text).toBe(largeText);
+    });
+
+    it("prunes large text in non-final assistant messages", () => {
+        const messages: any[] = [
+            { role: "assistant", content: [{ type: "text", text: "x".repeat(1000) }], timestamp: 1 },
+            { role: "assistant", content: [{ type: "text", text: "final output" }], timestamp: 2 },
+        ];
+        const pruned = pruneMessages(messages);
+        // First assistant message text should be pruned
+        expect(pruned[0].content[0].text).toContain("[pruned:");
+        expect(pruned[0].content[0].text).toContain("1000 chars");
+        // Last assistant message should be intact
+        expect(pruned[1].content[0].text).toBe("final output");
+    });
+
+    it("preserves toolCall parts in assistant messages for counting", () => {
+        const messages: any[] = [
+            {
+                role: "assistant",
+                content: [
+                    { type: "toolCall", id: "1", name: "read", arguments: {} },
+                    { type: "toolCall", id: "2", name: "bash", arguments: {} },
+                    { type: "text", text: "x".repeat(500) },
+                ],
+                timestamp: 1,
+            },
+            { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 2 },
+        ];
+        const pruned = pruneMessages(messages);
+        // toolCall parts preserved
+        const toolCalls = pruned[0].content.filter((p: any) => p.type === "toolCall");
+        expect(toolCalls).toHaveLength(2);
+        expect(toolCalls[0].name).toBe("read");
+        expect(toolCalls[1].name).toBe("bash");
+        // large text pruned
+        const textPart = pruned[0].content.find((p: any) => p.type === "text");
+        expect(textPart.text).toContain("[pruned:");
+    });
+
+    it("prunes large tool result content", () => {
+        const messages: any[] = [
+            { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "x".repeat(5000) }] },
+            { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 1 },
+        ];
+        const pruned = pruneMessages(messages);
+        expect(pruned[0].content[0].text).toContain("[pruned:");
+        expect(pruned[0].content[0].text).toContain("5000 chars");
+    });
+
+    it("preserves small content unchanged", () => {
+        const messages: any[] = [
+            { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "short" }] },
+            { role: "assistant", content: [{ type: "text", text: "also short" }], timestamp: 1 },
+            { role: "assistant", content: [{ type: "text", text: "final" }], timestamp: 2 },
+        ];
+        const pruned = pruneMessages(messages);
+        expect(pruned[0].content[0].text).toBe("short");
+        expect(pruned[1].content[0].text).toBe("also short");
+        expect(pruned[2].content[0].text).toBe("final");
+    });
+
+    it("preserves user messages unchanged", () => {
+        const messages: any[] = [
+            { role: "user", content: "x".repeat(1000), timestamp: 1 },
+            { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 2 },
+        ];
+        const pruned = pruneMessages(messages);
+        expect(pruned[0].content).toBe("x".repeat(1000));
+    });
+
+    it("handles messages with no assistant message", () => {
+        const messages: any[] = [
+            { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "x".repeat(500) }] },
+        ];
+        const pruned = pruneMessages(messages);
+        // No last assistant, so tool result gets pruned
+        expect(pruned[0].content[0].text).toContain("[pruned:");
     });
 });
