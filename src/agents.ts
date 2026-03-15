@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import type { Message } from "@mariozechner/pi-ai";
+import { EpisodeScanner } from "./episode-scanner.js";
 
 export interface AgentConfig {
     name: string;
@@ -150,6 +151,59 @@ function emptyUsage(): UsageStats {
     return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
+/**
+ * Prune large content from intermediate messages to free memory.
+ * Keeps the last assistant message intact (final output).
+ * Keeps assistant message structure (toolCall parts) for countToolCalls.
+ * Replaces large text content in tool results and non-final messages.
+ */
+export function pruneMessages(messages: Message[]): Message[] {
+    if (messages.length === 0) return messages;
+
+    // Find the index of the last assistant message
+    let lastAssistantIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "assistant") {
+            lastAssistantIdx = i;
+            break;
+        }
+    }
+
+    return messages.map((msg, i) => {
+        // Keep last assistant message intact — it's the final output
+        if (i === lastAssistantIdx) return msg;
+
+        // For assistant messages, keep structure (toolCall parts stay for counting)
+        // but prune large text parts
+        if (msg.role === "assistant") {
+            return {
+                ...msg,
+                content: msg.content.map(part => {
+                    if (part.type === "text" && part.text.length > 200) {
+                        return { ...part, text: `[pruned: ${part.text.length} chars]` };
+                    }
+                    return part;
+                }),
+            };
+        }
+
+        // For tool results, prune large text content
+        if (msg.role === "toolResult") {
+            return {
+                ...msg,
+                content: msg.content.map(part => {
+                    if (part.type === "text" && part.text.length > 200) {
+                        return { ...part, text: `[pruned: ${part.text.length} chars]` };
+                    }
+                    return part;
+                }),
+            };
+        }
+
+        return msg;
+    });
+}
+
 export async function spawnSubAgent(
     task: string,
     options: SpawnOptions & { defaultCwd: string; defaultModel?: string },
@@ -209,8 +263,7 @@ export async function spawnSubAgent(
     let processModel: string | undefined;
     let errorMessage: string | undefined;
     const onEvent = options.onEvent;
-    let emittedEpisodeCount = 0;
-    let accumulatedText = "";
+    const episodeScanner = new EpisodeScanner();
 
     try {
         if (signal?.aborted) throw new Error("Aborted before spawn");
@@ -262,19 +315,14 @@ export async function spawnSubAgent(
                         for (const part of msg.content) {
                             if (part.type === "text") {
                                 onEvent?.({ type: "text", text: part.text });
-                                accumulatedText += part.text;
-                            }
-                        }
 
-                        // Detect intermediate <episode> blocks in accumulated text
-                        if (onEvent) {
-                            const allBlocks = [...accumulatedText.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
-                            while (emittedEpisodeCount < allBlocks.length) {
-                                onEvent({
-                                    type: "episode_chunk",
-                                    episodeRaw: allBlocks[emittedEpisodeCount][0],
-                                });
-                                emittedEpisodeCount++;
+                                // Incremental episode scan — O(N) total instead of O(N×T)
+                                const newBlocks = episodeScanner.append(part.text);
+                                if (onEvent) {
+                                    for (const block of newBlocks) {
+                                        onEvent({ type: "episode_chunk", episodeRaw: block });
+                                    }
+                                }
                             }
                         }
 
@@ -324,7 +372,9 @@ export async function spawnSubAgent(
         });
 
         return {
-            text: getFinalText(messages), messages, usage,
+            text: getFinalText(messages),
+            messages: pruneMessages(messages),
+            usage,
             model: processModel, exitCode,
             error: errorMessage || (exitCode !== 0 ? stderr : undefined),
             durationMs: Date.now() - start,
