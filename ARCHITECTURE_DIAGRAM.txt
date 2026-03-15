@@ -1,0 +1,220 @@
+SPINDLE ARCHITECTURE - Module Dependencies & Data Flow
+========================================================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                        USER (Claude instance)                        │
+│                    Calls spindle_exec(code)                         │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │
+                    ┌────────────▼───────────┐
+                    │  index.ts (Conductor)  │
+                    │  ~200 lines            │
+                    │                        │
+                    │ • Session lifecycle    │
+                    │ • State threading      │
+                    │ • Tool registration    │
+                    └─┬──┬──┬──┬──┬──────────┘
+        ┌───────────┐ │  │  │  │  │
+        │           │ │  │  │  │  │
+        │ ┌─────────▼─┴──┐│  │  │  │
+        │ │ Imports:    ││  │  │  │
+        │ │ repl.ts ◄───┘│  │  │  │
+        │ └─────────────┬┘  │  │  │
+        │               │   │  │  │
+    ┌───▼──────────┐   │ ┌─▼──▼──┬─┐
+    │ repl.ts      │   │ │tools  ├─┼──┬─────────┐
+    │ ~165 lines   │   │ │.ts    │ │  │         │
+    │              │   │ │~130   │ │  │         │
+    │ • VM context │   │ │       │ │  │         │
+    │ • exec()     │   │ └─┬──┬──┴─┘  │         │
+    │ • bindings   │   │   │  │       │         │
+    │ • getVars()  │   │   │  │ ┌─────▼──┐      │
+    └──────┬───────┘   │   │  │ │agents  │      │
+           │           │   │  │ │.ts     │      │
+      Injected ◄───────┘   │  │ │~240    │      │
+      tools:            ┌──▼──┼─┤        │      │
+    • read             │     │ │ • spawn│      │
+    • bash             │     │ │ • events
+    • grep             │     │ │ • usage
+    • find             │     │ │         │      │
+    • edit             │     │ └────┬────┘      │
+    • write            │     │      │           │
+    • ls               │     │      │ ┌─────────▼────┐
+    • load             │     │      │ │threads.ts    │
+    • save             │     │      │ │~240 lines    │
+    • llm()            │     │      │ │              │
+    • thread()         │     │      │ │ • ThreadSpec │
+    • dispatch()       │     │      │ │ • dispatchX  │
+    • sleep()          │     │      │ │ • parseEpi   │
+                       │     │      └─┤              │
+                       │     │        └────┬─────────┘
+                       │     │             │
+                       │     │      ┌──────▼──────┐
+                       │     │      │ render.ts    │
+                       │     │      │ ~260 lines   │
+                       │     │      │              │
+                       │     └─────▶│ • formatCode │
+                       └───────────▶│ • formatExec │
+                                    │ • formatThread
+                                    │ • formatStatus
+                                    └──────────────┘
+                                           ▲
+                                           │
+                                    Display to user
+
+
+DATA FLOW FOR CODE EXECUTION
+=============================
+
+1. User calls: spindle_exec(code)
+                       ▼
+2. index.ts spindle_exec handler:
+   • Sets currentOnUpdate, currentSignal, currentCode (closures!)
+   • Calls repl.exec(code, signal)
+                       ▼
+3. repl.ts wraps code in async IIFE:
+   (async () => { code })()
+                       ▼
+4. VM context executes with injected bindings
+   ┌──────────────────────────────────────────┐
+   │ Possible actions:                        │
+   │                                          │
+   │ a) Direct I/O:                          │
+   │    await read({path})                   │
+   │    await bash({command})                │
+   │    ... (all wrapped by tools.ts)        │
+   │                                          │
+   │ b) Sub-agent orchestration:             │
+   │    await llm(prompt, {agent?, model?})  │
+   │      └─▶ agents.ts spawns pi process   │
+   │      └─▶ streams events as JSON         │
+   │      └─▶ returns final text + usage     │
+   │                                          │
+   │ c) Threaded task dispatch:              │
+   │    const s1 = thread(task, opts)        │
+   │    const s2 = thread(task, opts)        │
+   │    const eps = await dispatch([s1,s2]) │
+   │      └─▶ threads.ts work queue          │
+   │      └─▶ up to 4 concurrent (configurable)
+   │      └─▶ streams updates via closure    │
+   │      └─▶ returns Episode[] array        │
+   └──────────────────────────────────────────┘
+                       ▼
+5. Results formatted by render.ts
+                       ▼
+6. Displayed to user
+
+
+INTERFACE BOUNDARIES
+====================
+
+repl.ts ◄─────────────────────────────────────► index.ts
+  • exec(code, signal): Promise<ExecResult>
+  • inject(bindings: Record<string, unknown>)
+  • getVariables(): VariableInfo[]
+
+
+tools.ts ◄─────────────────────────────────────► index.ts
+  • createToolWrappers(cwd): ToolWrappers
+    (Record<string, (args) => Promise<string>>)
+  • createFileIO(cwd): {load, save}
+  • load(path, cwd): Promise<LoadResult>
+  • save(path, content, cwd): Promise<void>
+
+
+agents.ts ◄──────────────────────────────────┬─ index.ts
+    ▲                                         │
+    │                                         │
+    └──────────────────────────┬──────────────┘
+                               │
+                          threads.ts
+  • spawnSubAgent(task, opts, signal): Promise<SubAgentResult>
+  • discoverAgents(cwd): AgentConfig[]
+  • killAllSubAgents(): void
+  • resolveAgent(agents, name): AgentConfig?
+
+
+threads.ts ◄──────────────────────────────────► index.ts
+  • createThreadSpec(task, opts, signal): ThreadSpec
+  • dispatchThreads(specs, concurrency, onUpdate): Promise<Episode[]>
+  • parseEpisode(result, meta): Episode
+  • isThreadSpec(x): boolean
+
+
+render.ts ◄──────────────────────────────────► index.ts
+  • formatCodeForDisplay(code, theme): string
+  • formatExecResult(result, expanded, theme): string
+  • formatDispatchUpdate(threads): string
+  • formatStatusResult(details, theme): string
+
+
+CLOSURE STATE THREADING (Current Pattern - ⚠ Fragile)
+======================================================
+
+Per execution:
+
+  spindle_exec(code, signal, onUpdate, ctx)
+           │
+           ├─► currentOnUpdate = onUpdate ◄──┐
+           ├─► currentSignal = signal         │
+           └─► currentCode = code             │
+                                              │ Captured by closures
+  initRepl() injects:                         │
+                                              │
+    r.inject({                                │
+      dispatch: async (specs) => {            │
+        const onDispatchUpdate = (states) => {
+          if (!onUpdate) return;  ◄────────┘ Used here!
+          currentOnUpdate?.({...});          │
+        };                                    │
+      }                                       │
+    });                                       │
+
+
+WHAT'S CLEAN
+============
+
+✓ Zero coupling between core modules (repl, tools, agents, threads)
+✓ Single responsibility per file
+✓ Clear type boundaries (ThreadSpec, Episode, ThreadState)
+✓ Lazy async generator pattern for threading
+✓ Work queue with simple concurrency control
+✓ Event streaming from sub-agents
+✓ No global state except REPL context (intentional)
+
+
+WHAT COULD IMPROVE
+===================
+
+⚠ State threading via mutable closures (non-obvious data flow)
+  Suggestion: Pass ExecContext object explicitly
+
+⚠ Usage tracking scattered across multiple increments
+  Suggestion: Centralize with UsageAccumulator class
+
+⚠ Episode parsing fragile (regex on text)
+  Suggestion: Add validation layer + better error messages
+
+⚠ Error handling untyped (strings only)
+  Suggestion: Define tagged error union types
+
+⚠ Inconsistent abstractions in tools (text vs bulk I/O shapes)
+  Suggestion: Document the distinction clearly (minor issue)
+
+⚠ Mixed concerns in initRepl()
+  Suggestion: Split into 4-5 focused setup functions
+
+
+RECOMMENDED NEXT STEPS
+======================
+
+If modifying:
+1. Add structured error types to agents.ts
+2. Extract ExecContext pattern from closures
+3. Add validation layer to parseEpisode
+4. Add regression tests for episode parsing
+
+If reviewing:
+1. Focus on threads.ts work queue (most complex logic)
+2. Verify sub-agent event parsing in agents.ts
+3. Check render.ts handles all edge cases in dispatch updates

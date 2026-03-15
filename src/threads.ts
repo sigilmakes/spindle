@@ -116,6 +116,34 @@ export function createThreadSpec(
     };
 }
 
+function truncateThinking(text: string): string | null {
+    // Find the first meaningful line (skip markdown headings, blank lines, bullet prefixes)
+    for (const line of text.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith("#")) continue;
+        if (trimmed === "---" || trimmed === "```") continue;
+
+        // Truncate at word boundary
+        if (trimmed.length <= 80) return trimmed;
+        const cut = trimmed.lastIndexOf(" ", 80);
+        return trimmed.slice(0, cut > 20 ? cut : 80) + "...";
+    }
+    return null;
+}
+
+function pruneTextItems(items: DisplayItem[], maxText: number): void {
+    let textCount = 0;
+    for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].type === "text") {
+            textCount++;
+            if (textCount > maxText) {
+                items.splice(i, 1);
+            }
+        }
+    }
+}
+
 export type OnDispatchUpdate = (threads: ThreadState[]) => void;
 
 export async function dispatchThreads(
@@ -178,10 +206,11 @@ export async function dispatchThreads(
                     }
                     case "text":
                         if (event.text) {
-                            // Only keep the latest short thinking snippet
-                            const snippet = event.text.split("\n")[0].slice(0, 80);
-                            if (snippet.trim()) {
+                            const snippet = truncateThinking(event.text);
+                            if (snippet) {
                                 state.displayItems.push({ type: "text", text: snippet });
+                                // Cap text items — keep last 3, let tool calls accumulate freely
+                                pruneTextItems(state.displayItems, 3);
                             }
                         }
                         break;
