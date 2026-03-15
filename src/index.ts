@@ -4,13 +4,13 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
-import { spawnSubAgent, killAllSubAgents, type SubAgentEvent } from "./agents.js";
+import { spawnSubAgent, killAllSubAgents } from "./agents.js";
 import {
-    createThread, dispatchThreads,
-    type Episode, type ThreadOptions, type ThreadState, type OnDispatchUpdate,
+    createThreadSpec, dispatchThreads, isThreadSpec,
+    type Episode, type ThreadOptions, type ThreadSpec, type ThreadState,
 } from "./threads.js";
 import {
-    formatCodeForDisplay, formatExecResult, formatStatusResult, formatDispatchProgress,
+    formatCodeForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
 
@@ -50,40 +50,31 @@ export default function spindle(pi: ExtensionAPI) {
         });
 
         r.inject({
-            thread: (task: string, opts?: ThreadOptions) => {
-                const sig = currentSignal;
-                const threadOnEvent = (event: SubAgentEvent) => {
-                    // Live events from this thread — dispatch tracks these via per-thread state
-                    // (wired through dispatchThreads's onUpdate)
-                };
-                return createThread(
-                    task,
-                    { ...opts, defaultCwd: cwd, defaultModel: subModel },
-                    sig,
-                    threadOnEvent,
-                );
-            },
-            dispatch: async (threads: AsyncGenerator<Episode, void, undefined>[], concurrency?: number) => {
+            thread: (task: string, opts?: ThreadOptions) =>
+                createThreadSpec(task, { ...opts, defaultCwd: cwd, defaultModel: subModel }, currentSignal),
+
+            dispatch: async (specs: ThreadSpec[], concurrency?: number) => {
                 const onUpdate = currentOnUpdate;
                 const code = currentCode;
+                const signal = currentSignal;
 
-                // Extract thread metadata for display
-                // (threads are opaque generators, but we stored task/agent in createThread)
-
-                const onDispatchUpdate: OnDispatchUpdate = (threadStates: ThreadState[]) => {
+                const onDispatchUpdate = (threadStates: ThreadState[]) => {
                     if (!onUpdate) return;
+                    const doneEpisodes = threadStates.filter(t => t.episode).map(t => t.episode!);
                     onUpdate({
-                        content: [{ type: "text", text: formatDispatchProgress(threadStates) }],
+                        content: [{ type: "text", text: formatDispatchUpdate(threadStates) }],
                         details: {
                             code,
-                            episodes: threadStates.filter(t => t.episode).map(t => t.episode!),
-                            durationMs: Math.max(0, ...threadStates.map(t => t.durationMs)),
+                            threadStates,
+                            episodes: doneEpisodes.length > 0 ? doneEpisodes : undefined,
+                            durationMs: Math.max(0, ...threadStates.filter(t => t.startTime > 0).map(t =>
+                                t.status === "done" ? t.durationMs : Date.now() - t.startTime)),
                             error: false,
                         },
                     });
                 };
 
-                const episodes = await dispatchThreads(threads, concurrency, onDispatchUpdate);
+                const episodes = await dispatchThreads(specs, concurrency, onDispatchUpdate, signal);
                 for (const ep of episodes) {
                     cumulativeUsage.totalCost += ep.cost;
                     cumulativeUsage.totalEpisodes++;
@@ -144,7 +135,6 @@ export default function spindle(pi: ExtensionAPI) {
             currentSignal = signal;
             currentCode = params.code;
 
-            // Kill all subagents on abort
             const abortCleanup = () => killAllSubAgents();
             signal?.addEventListener("abort", abortCleanup, { once: true });
 
@@ -266,6 +256,6 @@ export default function spindle(pi: ExtensionAPI) {
 export { Repl } from "./repl.js";
 export { createToolWrappers, createFileIO, load, save } from "./tools.js";
 export { spawnSubAgent, discoverAgents, resolveAgent } from "./agents.js";
-export { createThread, dispatchThreads, parseEpisode, EPISODE_SUFFIX } from "./threads.js";
-export type { Episode, ThreadOptions } from "./threads.js";
+export { createThreadSpec, dispatchThreads, parseEpisode, EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
+export type { Episode, ThreadOptions, ThreadSpec, ThreadState, DisplayItem } from "./threads.js";
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";

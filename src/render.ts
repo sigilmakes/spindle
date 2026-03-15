@@ -1,10 +1,12 @@
+import * as os from "node:os";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { highlightCode, type Theme } from "@mariozechner/pi-coding-agent";
-import type { Episode, ThreadState } from "./threads.js";
+import { type DisplayItem, type Episode, type ThreadState, COLLAPSED_ITEM_COUNT } from "./threads.js";
 
 export interface SpindleExecDetails {
     code: string;
     episodes?: Episode[];
+    threadStates?: ThreadState[];
     durationMs?: number;
     error?: boolean;
 }
@@ -33,33 +35,143 @@ export function formatCodeForDisplay(code: string, theme: Theme, maxLines = 15):
     return text.trimEnd();
 }
 
-function episodeIcon(ep: Episode, theme: Theme): string {
-    switch (ep.status) {
-        case "success": return theme.fg("success", "✓");
-        case "failure": return theme.fg("error", "✗");
-        case "blocked": return theme.fg("warning", "⚠");
-        default: return theme.fg("dim", "○");
+// --- Tool call formatting (adapted from subagent extension) ---
+
+function shortenPath(p: string): string {
+    const home = os.homedir();
+    return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+function formatToolCall(name: string, args: Record<string, unknown>, theme: Theme): string {
+    switch (name) {
+        case "bash": {
+            const cmd = (args.command as string) || "...";
+            const preview = cmd.length > 50 ? cmd.slice(0, 50) + "..." : cmd;
+            return theme.fg("muted", "$ ") + theme.fg("toolOutput", preview);
+        }
+        case "read": {
+            const p = shortenPath((args.file_path || args.path || "...") as string);
+            let text = theme.fg("muted", "read ") + theme.fg("accent", p);
+            const offset = args.offset as number | undefined;
+            const limit = args.limit as number | undefined;
+            if (offset || limit) text += theme.fg("dim", `:${offset ?? 1}${limit ? `-${(offset ?? 1) + limit - 1}` : ""}`);
+            return text;
+        }
+        case "write": {
+            const p = shortenPath((args.file_path || args.path || "...") as string);
+            return theme.fg("muted", "write ") + theme.fg("accent", p);
+        }
+        case "edit": {
+            const p = shortenPath((args.file_path || args.path || "...") as string);
+            return theme.fg("muted", "edit ") + theme.fg("accent", p);
+        }
+        case "grep": {
+            const pattern = (args.pattern || "") as string;
+            const p = shortenPath((args.path || ".") as string);
+            return theme.fg("muted", "grep ") + theme.fg("accent", `/${pattern}/`) + theme.fg("dim", ` in ${p}`);
+        }
+        case "find": {
+            const pattern = (args.pattern || "*") as string;
+            const p = shortenPath((args.path || ".") as string);
+            return theme.fg("muted", "find ") + theme.fg("accent", pattern) + theme.fg("dim", ` in ${p}`);
+        }
+        case "ls": {
+            const p = shortenPath((args.path || ".") as string);
+            return theme.fg("muted", "ls ") + theme.fg("accent", p);
+        }
+        default: {
+            const s = JSON.stringify(args);
+            const preview = s.length > 40 ? s.slice(0, 40) + "..." : s;
+            return theme.fg("accent", name) + theme.fg("dim", ` ${preview}`);
+        }
     }
 }
 
-function formatEpisodeColumn(ep: Episode, expanded: boolean, theme: Theme): string {
-    const icon = episodeIcon(ep, theme);
-    const taskPreview = ep.task.length > 40 ? ep.task.slice(0, 40) + "..." : ep.task;
-    let col = `${icon} ${theme.fg("accent", ep.agent)}: ${theme.fg("dim", taskPreview)}`;
-    col += `\n  ${ep.summary.slice(0, 80)}${ep.summary.length > 80 ? "..." : ""}`;
+function formatTokens(n: number): string {
+    if (n < 1000) return String(n);
+    if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+    return `${Math.round(n / 1000)}k`;
+}
 
-    if (expanded && ep.findings.length > 0) {
-        for (const f of ep.findings) col += "\n  " + theme.fg("dim", "- " + f);
-    }
-    if (expanded && ep.artifacts.length > 0) {
-        col += "\n  " + theme.fg("dim", "Artifacts: " + ep.artifacts.join(", "));
-    }
-    if (ep.blockers.length > 0) {
-        col += "\n  " + theme.fg("warning", "Blocked: " + ep.blockers.join(", "));
+// --- Thread column rendering ---
+
+function formatThreadColumn(state: ThreadState, expanded: boolean, theme: Theme): string {
+    const icon = state.status === "done"
+        ? (state.episode?.status === "success" ? theme.fg("success", "✓")
+            : state.episode?.status === "failure" ? theme.fg("error", "✗")
+            : state.episode?.status === "blocked" ? theme.fg("warning", "⚠")
+            : theme.fg("success", "✓"))
+        : state.status === "running" ? theme.fg("warning", "○")
+        : theme.fg("dim", "○");
+
+    const taskPreview = state.task.length > 40 ? state.task.slice(0, 40) + "..." : state.task;
+    let col = `${icon} ${theme.fg("accent", state.agent)}: ${theme.fg("dim", taskPreview)}`;
+
+    const items = state.displayItems;
+    const showCount = expanded ? items.length : COLLAPSED_ITEM_COUNT;
+    const skipped = Math.max(0, items.length - showCount);
+    const visible = items.slice(-showCount);
+
+    if (skipped > 0) {
+        col += "\n  " + theme.fg("muted", `... +${skipped} earlier tools`);
     }
 
-    col += "\n  " + theme.fg("dim", `${ep.toolCalls} tools · ${(ep.duration / 1000).toFixed(1)}s · $${ep.cost.toFixed(4)}`);
+    for (const item of visible) {
+        if (item.type === "toolCall") {
+            const check = item.done ? theme.fg("success", " ✓") : "";
+            const prefix = item.done ? theme.fg("muted", "→ ") : theme.fg("dim", "→ ");
+            col += "\n  " + prefix + formatToolCall(item.name, item.args, theme) + check;
+        } else {
+            col += "\n  " + theme.fg("dim", item.text);
+        }
+    }
+
+    // Stats line
+    const elapsed = state.status === "running"
+        ? (Date.now() - state.startTime) / 1000
+        : state.durationMs / 1000;
+    const tokens = state.usage.input + state.usage.output;
+
+    if (state.status === "done" && state.episode) {
+        col += "\n  " + theme.fg("dim", `${elapsed.toFixed(0)}s · ${formatTokens(tokens)} · $${state.cost.toFixed(4)}`);
+    } else if (state.status === "running") {
+        const parts = [`${elapsed.toFixed(0)}s`];
+        if (tokens > 0) parts.push(formatTokens(tokens));
+        if (state.cost > 0) parts.push(`$${state.cost.toFixed(4)}`);
+        col += "\n  " + theme.fg("dim", `Working... ${parts.join(" · ")}`);
+    }
+
     return col;
+}
+
+// --- Public render functions ---
+
+export function formatDispatchUpdate(threads: ThreadState[]): string {
+    const running = threads.filter(t => t.status === "running").length;
+    const done = threads.filter(t => t.status === "done").length;
+    const pending = threads.filter(t => t.status === "pending").length;
+
+    let text = `Dispatching ${threads.length} threads: ${done} done, ${running} running`;
+    if (pending > 0) text += `, ${pending} pending`;
+
+    const elapsed = Math.max(0, ...threads
+        .filter(t => t.startTime > 0)
+        .map(t => t.status === "done" ? t.durationMs : Date.now() - t.startTime));
+    text += ` (${(elapsed / 1000).toFixed(0)}s)`;
+
+    for (const t of threads) {
+        const icon = t.status === "done" ? "✓" : t.status === "running" ? "○" : "·";
+        text += `\n  ${icon} ${t.agent}: `;
+        if (t.status === "done" && t.episode) {
+            text += `${t.episode.status} — ${t.episode.summary.slice(0, 60)}`;
+        } else if (t.status === "running") {
+            text += `${t.toolCount} tools, ${((Date.now() - t.startTime) / 1000).toFixed(0)}s`;
+        } else {
+            text += "pending";
+        }
+    }
+
+    return text;
 }
 
 export function formatExecResult(
@@ -76,7 +188,8 @@ export function formatExecResult(
     if (details?.durationMs) text += theme.fg("dim", `${(details.durationMs / 1000).toFixed(1)}s`);
     text += "\n";
 
-    if (textContent) {
+    // Console output (non-dispatch)
+    if (textContent && !details?.threadStates?.length) {
         const lines = textContent.split("\n");
         const max = expanded ? lines.length : 20;
         text += lines.slice(0, max).map(l => theme.fg("toolOutput", l)).join("\n");
@@ -85,22 +198,33 @@ export function formatExecResult(
         }
     }
 
-    if (details?.episodes?.length) {
-        const eps = details.episodes;
-        const done = eps.filter(e => e.status !== "running").length;
-        text += "\n\n" + theme.fg("muted", `─── Dispatch: ${done}/${eps.length} complete ───`);
+    // Dispatch thread columns
+    if (details?.threadStates?.length) {
+        const states = details.threadStates;
+        const done = states.filter(t => t.status === "done").length;
+        text += theme.fg("muted", `─── Dispatch: ${done}/${states.length} complete ───`);
 
-        for (const ep of eps) {
-            text += "\n\n" + formatEpisodeColumn(ep, expanded, theme);
+        for (const state of states) {
+            text += "\n\n" + formatThreadColumn(state, expanded, theme);
         }
 
-        const totalCost = eps.reduce((s, e) => s + e.cost, 0);
-        const totalDuration = Math.max(...eps.map(e => e.duration));
+        const totalCost = states.reduce((s, t) => s + t.cost, 0);
+        const wallTime = Math.max(0, ...states.map(t => t.durationMs));
         text += "\n\n" + theme.fg("dim",
-            `Total: ${eps.length} threads · ${(totalDuration / 1000).toFixed(1)}s wall · $${totalCost.toFixed(4)}`);
+            `Total: ${states.length} threads · ${(wallTime / 1000).toFixed(1)}s wall · $${totalCost.toFixed(4)}`);
 
-        if (!expanded && eps.some(e => e.findings.length > 0)) {
-            text += "\n" + theme.fg("muted", "(Ctrl+O for findings/artifacts)");
+        if (!expanded) {
+            text += "\n" + theme.fg("muted", "(Ctrl+O to expand)");
+        }
+    }
+    // Fallback: episodes without threadStates (e.g. from text content)
+    else if (details?.episodes?.length) {
+        const eps = details.episodes;
+        text += "\n" + theme.fg("muted", `─── Episodes: ${eps.length} ───`);
+        for (const ep of eps) {
+            const icon = ep.status === "success" ? theme.fg("success", "✓")
+                : ep.status === "failure" ? theme.fg("error", "✗") : theme.fg("warning", "⚠");
+            text += `\n${icon} ${theme.fg("accent", ep.agent)}: ${ep.summary.slice(0, 80)}`;
         }
     }
 
@@ -128,42 +252,6 @@ export function formatStatusResult(details: SpindleStatusDetails, theme: Theme):
     text += `  Sub-model: ${details.config.subModel || "(default)"}\n`;
     text += `  Output limit: ${details.config.outputLimit} chars\n`;
     text += `  Timeout: ${details.config.timeoutMs / 1000}s\n`;
-
-    return text;
-}
-
-export function formatDispatchProgress(threads: ThreadState[]): string {
-    const running = threads.filter(t => t.status === "running");
-    const done = threads.filter(t => t.status === "done");
-    const pending = threads.filter(t => t.status === "pending");
-
-    const elapsed = Math.max(0, ...threads
-        .filter(t => t.startTime > 0)
-        .map(t => t.status === "done" ? t.durationMs : Date.now() - t.startTime));
-
-    let text = `Dispatching ${threads.length} threads: ${done.length} done, ${running.length} running`;
-    if (pending.length > 0) text += `, ${pending.length} pending`;
-    text += ` (${(elapsed / 1000).toFixed(0)}s)`;
-
-    for (const t of threads) {
-        const icon = t.status === "done" ? "✓"
-            : t.status === "running" ? "⏳"
-            : "○";
-        const taskPreview = t.task.length > 50 ? t.task.slice(0, 50) + "..." : t.task;
-        text += `\n  ${icon} ${t.agent}: ${taskPreview}`;
-
-        if (t.status === "running") {
-            const sec = ((Date.now() - t.startTime) / 1000).toFixed(0);
-            text += ` (${sec}s)`;
-            if (t.recentTools.length > 0) {
-                text += ` — ${t.recentTools.slice(-3).join(", ")}`;
-            }
-        } else if (t.status === "done" && t.episode) {
-            const ep = t.episode;
-            text += ` — ${ep.status}`;
-            if (ep.summary) text += `: ${ep.summary.slice(0, 60)}`;
-        }
-    }
 
     return text;
 }

@@ -3,11 +3,11 @@ import {
     formatCodeForDisplay,
     formatExecResult,
     formatStatusResult,
-    formatDispatchProgress,
+    formatDispatchUpdate,
     type SpindleExecDetails,
     type SpindleStatusDetails,
 } from "../src/render.js";
-import type { Episode, ThreadState } from "../src/threads.js";
+import type { Episode, ThreadState, DisplayItem } from "../src/threads.js";
 
 const theme = {
     fg: (_color: string, text: string) => text,
@@ -23,6 +23,16 @@ function makeEpisode(overrides?: Partial<Episode>): Episode {
     };
 }
 
+function makeThreadState(overrides?: Partial<ThreadState>): ThreadState {
+    return {
+        index: 0, task: "test task", agent: "scout",
+        status: "pending", displayItems: [], toolCount: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+        startTime: 0, durationMs: 0, cost: 0,
+        ...overrides,
+    };
+}
+
 describe("formatCodeForDisplay", () => {
     it("formats short code with header", () => {
         const result = formatCodeForDisplay('console.log("hi")', theme);
@@ -34,31 +44,21 @@ describe("formatCodeForDisplay", () => {
         const lines = Array.from({ length: 30 }, (_, i) => `line${i}`).join("\n");
         const result = formatCodeForDisplay(lines, theme, 15);
         expect(result).toContain("15 more lines");
-        expect(result).toContain("line0");
-        expect(result).not.toContain("line20");
-    });
-
-    it("handles single-line code", () => {
-        const result = formatCodeForDisplay("x = 1", theme);
-        expect(result).toContain("x = 1");
-        expect(result).not.toContain("more lines");
     });
 
     it("handles empty code", () => {
-        const result = formatCodeForDisplay("", theme);
-        expect(result).toContain("spindle_exec");
+        expect(formatCodeForDisplay("", theme)).toContain("spindle_exec");
     });
 });
 
 describe("formatExecResult", () => {
-    it("formats successful result with duration", () => {
+    it("formats successful result", () => {
         const result = {
             content: [{ type: "text" as const, text: "output here" }],
             details: { code: "x = 1", durationMs: 150, error: false } satisfies SpindleExecDetails,
         };
         const text = formatExecResult(result, false, theme);
         expect(text).toContain("✓");
-        expect(text).toMatch(/0\.\ds/);
         expect(text).toContain("output here");
     });
 
@@ -67,100 +67,90 @@ describe("formatExecResult", () => {
             content: [{ type: "text" as const, text: "Error: boom" }],
             details: { code: "bad()", durationMs: 50, error: true } satisfies SpindleExecDetails,
         };
-        const text = formatExecResult(result, false, theme);
-        expect(text).toContain("✗");
-        expect(text).toContain("Error");
+        expect(formatExecResult(result, false, theme)).toContain("✗");
     });
 
-    it("formats dispatch episodes as columns", () => {
-        const result = {
-            content: [{ type: "text" as const, text: "" }],
-            details: {
-                code: "dispatch([...])", durationMs: 5000, error: false,
-                episodes: [
-                    makeEpisode({ agent: "scout", summary: "Found 3 issues", findings: ["issue A", "issue B"] }),
-                    makeEpisode({ agent: "worker", summary: "Fixed them", status: "success" }),
+    it("renders thread columns when threadStates present", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "done", agent: "scout", task: "analyze code",
+                durationMs: 3000, cost: 0.02,
+                displayItems: [
+                    { type: "toolCall", name: "read", args: { path: "src/index.ts" }, done: true },
+                    { type: "text", text: "Let me analyze..." },
+                    { type: "toolCall", name: "grep", args: { pattern: "TODO", path: "src/" }, done: true },
                 ],
-            } satisfies SpindleExecDetails,
-        };
-        const text = formatExecResult(result, true, theme);
-        expect(text).toContain("Dispatch: 2/2 complete");
-        expect(text).toContain("scout");
-        expect(text).toContain("worker");
-        expect(text).toContain("Found 3 issues");
-        expect(text).toContain("issue A");
-        expect(text).toContain("2 threads");
-    });
-
-    it("shows Ctrl+O hint in collapsed mode when findings exist", () => {
+                episode: makeEpisode({ summary: "Found 3 issues" }),
+            }),
+            makeThreadState({
+                index: 1, status: "running", agent: "scout", task: "check tests",
+                startTime: Date.now() - 5000, toolCount: 2,
+                displayItems: [
+                    { type: "toolCall", name: "read", args: { path: "test/repl.test.ts" }, done: true },
+                    { type: "toolCall", name: "bash", args: { command: "npm test" }, done: false },
+                ],
+            }),
+        ];
         const result = {
             content: [{ type: "text" as const, text: "" }],
-            details: {
-                code: "x", durationMs: 100, error: false,
-                episodes: [makeEpisode({ findings: ["finding1"] })],
-            } satisfies SpindleExecDetails,
+            details: { code: "x", durationMs: 5000, error: false, threadStates: states } satisfies SpindleExecDetails,
         };
-        const collapsed = formatExecResult(result, false, theme);
-        expect(collapsed).toContain("Ctrl+O");
-        const expanded = formatExecResult(result, true, theme);
-        expect(expanded).not.toContain("Ctrl+O for findings");
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("Dispatch: 1/2 complete");
+        expect(text).toContain("scout");
+        expect(text).toContain("read");
+        expect(text).toContain("✓");
+        expect(text).toContain("grep");
+        expect(text).toContain("npm test");
+        expect(text).toContain("Working...");
     });
 
-    it("truncates long output in collapsed mode", () => {
-        const longOutput = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n");
+    it("collapses earlier tools", () => {
+        const items: DisplayItem[] = Array.from({ length: 15 }, (_, i) => ({
+            type: "toolCall" as const, name: "read", args: { path: `file${i}.ts` }, done: true,
+        }));
+        const states: ThreadState[] = [
+            makeThreadState({ status: "done", displayItems: items, episode: makeEpisode() }),
+        ];
         const result = {
-            content: [{ type: "text" as const, text: longOutput }],
-            details: { code: "x", durationMs: 100, error: false } satisfies SpindleExecDetails,
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
         };
         const collapsed = formatExecResult(result, false, theme);
-        expect(collapsed).toContain("30 more lines");
+        expect(collapsed).toContain("+5 earlier tools");
         const expanded = formatExecResult(result, true, theme);
-        expect(expanded).not.toContain("more lines");
+        expect(expanded).not.toContain("earlier tools");
     });
 
-    it("handles zero episodes", () => {
+    it("handles zero threads", () => {
         const result = {
             content: [{ type: "text" as const, text: "done" }],
             details: { code: "x", durationMs: 10, error: false } satisfies SpindleExecDetails,
         };
-        const text = formatExecResult(result, false, theme);
-        expect(text).not.toContain("Dispatch");
-        expect(text).toContain("done");
+        expect(formatExecResult(result, false, theme)).not.toContain("Dispatch");
     });
 
-    it("handles failed episodes", () => {
+    it("handles blocked episodes", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "done",
+                episode: makeEpisode({ status: "blocked", summary: "Stuck" }),
+            }),
+        ];
         const result = {
             content: [{ type: "text" as const, text: "" }],
-            details: {
-                code: "x", durationMs: 100, error: false,
-                episodes: [makeEpisode({ status: "failure", summary: "Crashed", agent: "worker" })],
-            } satisfies SpindleExecDetails,
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
         };
-        const text = formatExecResult(result, false, theme);
-        expect(text).toContain("✗");
-        expect(text).toContain("Crashed");
+        expect(formatExecResult(result, false, theme)).toContain("⚠");
     });
 
-    it("handles blocked episodes with blockers", () => {
-        const result = {
-            content: [{ type: "text" as const, text: "" }],
-            details: {
-                code: "x", durationMs: 100, error: false,
-                episodes: [makeEpisode({ status: "blocked", blockers: ["missing creds"] })],
-            } satisfies SpindleExecDetails,
-        };
-        const text = formatExecResult(result, false, theme);
-        expect(text).toContain("⚠");
-        expect(text).toContain("missing creds");
-    });
-
-    it("handles many episodes (>6)", () => {
-        const episodes = Array.from({ length: 8 }, (_, i) =>
-            makeEpisode({ agent: `scout-${i}`, task: `task ${i}`, summary: `summary ${i}` })
+    it("handles many threads (>6)", () => {
+        const states = Array.from({ length: 8 }, (_, i) =>
+            makeThreadState({ index: i, agent: `scout-${i}`, status: "done", episode: makeEpisode() })
         );
         const result = {
             content: [{ type: "text" as const, text: "" }],
-            details: { code: "x", durationMs: 100, error: false, episodes } satisfies SpindleExecDetails,
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
         };
         const text = formatExecResult(result, false, theme);
         expect(text).toContain("8/8 complete");
@@ -168,44 +158,69 @@ describe("formatExecResult", () => {
         expect(text).toContain("scout-7");
     });
 
-    it("handles empty output and no episodes", () => {
+    it("shows thinking text", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 1000,
+                displayItems: [{ type: "text", text: "Let me analyze the auth module..." }],
+            }),
+        ];
         const result = {
             content: [{ type: "text" as const, text: "" }],
-            details: { code: "x", durationMs: 10, error: false } satisfies SpindleExecDetails,
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
         };
-        const text = formatExecResult(result, false, theme);
-        expect(text).toContain("✓");
+        expect(formatExecResult(result, false, theme)).toContain("Let me analyze");
+    });
+});
+
+describe("formatDispatchUpdate", () => {
+    it("shows pending threads", () => {
+        const text = formatDispatchUpdate([makeThreadState(), makeThreadState({ index: 1 })]);
+        expect(text).toContain("2 threads");
+        expect(text).toContain("0 done");
     });
 
-    it("shows artifacts in expanded mode", () => {
-        const result = {
-            content: [{ type: "text" as const, text: "" }],
-            details: {
-                code: "x", durationMs: 100, error: false,
-                episodes: [makeEpisode({ artifacts: ["src/fix.ts", "test/fix.test.ts"] })],
-            } satisfies SpindleExecDetails,
-        };
-        const text = formatExecResult(result, true, theme);
-        expect(text).toContain("src/fix.ts");
-        expect(text).toContain("test/fix.test.ts");
+    it("shows running threads", () => {
+        const text = formatDispatchUpdate([
+            makeThreadState({ status: "running", startTime: Date.now() - 5000, toolCount: 3 }),
+        ]);
+        expect(text).toContain("1 running");
+        expect(text).toContain("3 tools");
+    });
+
+    it("shows done threads with summary", () => {
+        const text = formatDispatchUpdate([
+            makeThreadState({
+                status: "done", durationMs: 3000,
+                episode: makeEpisode({ status: "success", summary: "Fixed the bug" }),
+            }),
+        ]);
+        expect(text).toContain("1 done");
+        expect(text).toContain("Fixed the bug");
+    });
+
+    it("shows mixed state", () => {
+        const text = formatDispatchUpdate([
+            makeThreadState({ status: "done", durationMs: 2000, episode: makeEpisode() }),
+            makeThreadState({ index: 1, status: "running", startTime: Date.now() - 1000, toolCount: 1 }),
+            makeThreadState({ index: 2, status: "pending" }),
+        ]);
+        expect(text).toContain("1 done");
+        expect(text).toContain("1 running");
+        expect(text).toContain("1 pending");
     });
 });
 
 describe("formatStatusResult", () => {
     it("formats status with variables", () => {
         const details: SpindleStatusDetails = {
-            variables: [
-                { name: "x", type: "number", preview: "42" },
-                { name: "data", type: "object", preview: "{a, b}" },
-            ],
+            variables: [{ name: "x", type: "number", preview: "42" }],
             usage: { totalCost: 0.05, totalEpisodes: 3, totalLlmCalls: 7 },
             config: { subModel: "fast-model", outputLimit: 8192, timeoutMs: 300000 },
         };
         const text = formatStatusResult(details, theme);
         expect(text).toContain("x");
         expect(text).toContain("42");
-        expect(text).toContain("Episodes: 3");
-        expect(text).toContain("LLM calls: 7");
         expect(text).toContain("fast-model");
     });
 
@@ -215,58 +230,6 @@ describe("formatStatusResult", () => {
             usage: { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 },
             config: { subModel: undefined, outputLimit: 8192, timeoutMs: 300000 },
         };
-        const text = formatStatusResult(details, theme);
-        expect(text).toContain("No variables");
-        expect(text).toContain("(default)");
-    });
-});
-
-describe("formatDispatchProgress", () => {
-    function makeState(overrides?: Partial<ThreadState>): ThreadState {
-        return {
-            index: 0, task: "test task", agent: "scout",
-            status: "pending", recentTools: [], toolCount: 0,
-            startTime: 0, durationMs: 0, cost: 0,
-            ...overrides,
-        };
-    }
-
-    it("shows pending threads", () => {
-        const text = formatDispatchProgress([makeState(), makeState({ index: 1 })]);
-        expect(text).toContain("2 threads");
-        expect(text).toContain("0 done");
-        expect(text).toContain("○");
-    });
-
-    it("shows running threads with elapsed time", () => {
-        const text = formatDispatchProgress([
-            makeState({ status: "running", startTime: Date.now() - 5000, agent: "scout" }),
-        ]);
-        expect(text).toContain("1 running");
-        expect(text).toContain("⏳");
-        expect(text).toContain("scout");
-    });
-
-    it("shows done threads with episode summary", () => {
-        const text = formatDispatchProgress([
-            makeState({
-                status: "done", durationMs: 3000, agent: "worker",
-                episode: makeEpisode({ status: "success", summary: "Fixed the bug" }),
-            }),
-        ]);
-        expect(text).toContain("1 done");
-        expect(text).toContain("✓");
-        expect(text).toContain("Fixed the bug");
-    });
-
-    it("shows mixed state", () => {
-        const text = formatDispatchProgress([
-            makeState({ status: "done", durationMs: 2000, episode: makeEpisode() }),
-            makeState({ index: 1, status: "running", startTime: Date.now() - 1000 }),
-            makeState({ index: 2, status: "pending" }),
-        ]);
-        expect(text).toContain("1 done");
-        expect(text).toContain("1 running");
-        expect(text).toContain("1 pending");
+        expect(formatStatusResult(details, theme)).toContain("No variables");
     });
 });

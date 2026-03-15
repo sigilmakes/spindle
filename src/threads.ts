@@ -1,4 +1,4 @@
-import { spawnSubAgent, type SubAgentEvent, type SubAgentResult } from "./agents.js";
+import { spawnSubAgent, type SubAgentEvent, type SubAgentResult, type UsageStats } from "./agents.js";
 
 export interface Episode {
     status: "success" | "failure" | "blocked" | "running";
@@ -34,6 +34,193 @@ blockers:
 
 const DEFAULT_CONCURRENCY = 4;
 const MAX_CONCURRENCY = 8;
+const COLLAPSED_ITEM_COUNT = 10;
+
+export type DisplayItem =
+    | { type: "text"; text: string }
+    | { type: "toolCall"; name: string; args: Record<string, unknown>; done: boolean };
+
+export interface ThreadState {
+    index: number;
+    task: string;
+    agent: string;
+    status: "pending" | "running" | "done";
+    displayItems: DisplayItem[];
+    toolCount: number;
+    usage: UsageStats;
+    startTime: number;
+    durationMs: number;
+    cost: number;
+    model?: string;
+    episode?: Episode;
+}
+
+export interface ThreadOptions {
+    agent?: string;
+    model?: string;
+    tools?: string[];
+    timeout?: number;
+}
+
+export interface ThreadSpec {
+    __brand: "ThreadSpec";
+    task: string;
+    agent: string;
+    opts: ThreadOptions & { defaultCwd: string; defaultModel?: string };
+    signal?: AbortSignal;
+    // AsyncGenerator protocol for direct consumption (for await...of)
+    [Symbol.asyncIterator](): AsyncGenerator<Episode, void, undefined>;
+    next(value?: undefined): Promise<IteratorResult<Episode, void>>;
+    return(value?: void): Promise<IteratorResult<Episode, void>>;
+    throw(e?: unknown): Promise<IteratorResult<Episode, void>>;
+}
+
+export function isThreadSpec(x: unknown): x is ThreadSpec {
+    return typeof x === "object" && x !== null && (x as any).__brand === "ThreadSpec";
+}
+
+export function createThreadSpec(
+    task: string,
+    opts: ThreadOptions & { defaultCwd: string; defaultModel?: string },
+    signal?: AbortSignal,
+): ThreadSpec {
+    let generator: AsyncGenerator<Episode, void, undefined> | null = null;
+
+    const lazyGen = () => {
+        if (!generator) {
+            generator = (async function* () {
+                const result = await spawnSubAgent(
+                    task,
+                    {
+                        ...opts, systemPromptSuffix: EPISODE_SUFFIX,
+                        defaultCwd: opts.defaultCwd, defaultModel: opts.defaultModel,
+                    },
+                    signal,
+                );
+                yield parseEpisode(result, { task, agent: opts.agent || "anonymous" });
+            })();
+        }
+        return generator;
+    };
+
+    return {
+        __brand: "ThreadSpec",
+        task,
+        agent: opts.agent || "anonymous",
+        opts,
+        signal,
+        [Symbol.asyncIterator]() { return lazyGen(); },
+        next(value?: undefined) { return lazyGen().next(value); },
+        return(value?: void) { return lazyGen().return(value); },
+        throw(e?: unknown) { return lazyGen().throw(e); },
+    };
+}
+
+export type OnDispatchUpdate = (threads: ThreadState[]) => void;
+
+export async function dispatchThreads(
+    specs: ThreadSpec[],
+    concurrency: number = DEFAULT_CONCURRENCY,
+    onUpdate?: OnDispatchUpdate,
+    signal?: AbortSignal,
+): Promise<Episode[]> {
+    if (specs.length === 0) return [];
+
+    const limit = Math.max(1, Math.min(concurrency, MAX_CONCURRENCY));
+    const results: Episode[] = new Array(specs.length);
+    let nextIndex = 0;
+
+    const states: ThreadState[] = specs.map((spec, i) => ({
+        index: i,
+        task: spec.task,
+        agent: spec.agent,
+        status: "pending" as const,
+        displayItems: [],
+        toolCount: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+        startTime: 0,
+        durationMs: 0,
+        cost: 0,
+    }));
+
+    const emit = () => onUpdate?.(states);
+    emit();
+
+    const workers = Array.from({ length: Math.min(limit, specs.length) }, async () => {
+        while (true) {
+            const current = nextIndex++;
+            if (current >= specs.length) return;
+
+            const spec = specs[current];
+            const state = states[current];
+            state.status = "running";
+            state.startTime = Date.now();
+            emit();
+
+            const onEvent = (event: SubAgentEvent) => {
+                switch (event.type) {
+                    case "tool_start":
+                        state.displayItems.push({
+                            type: "toolCall", name: event.toolName!, args: event.toolArgs || {}, done: false,
+                        });
+                        state.toolCount++;
+                        break;
+                    case "tool_end": {
+                        // Mark the most recent matching tool call as done
+                        for (let i = state.displayItems.length - 1; i >= 0; i--) {
+                            const item = state.displayItems[i];
+                            if (item.type === "toolCall" && item.name === event.toolName && !item.done) {
+                                item.done = true;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    case "text":
+                        if (event.text) {
+                            // Only keep the latest short thinking snippet
+                            const snippet = event.text.split("\n")[0].slice(0, 80);
+                            if (snippet.trim()) {
+                                state.displayItems.push({ type: "text", text: snippet });
+                            }
+                        }
+                        break;
+                    case "turn":
+                        if (event.usage) state.usage = { ...event.usage };
+                        break;
+                }
+                state.durationMs = Date.now() - state.startTime;
+                emit();
+            };
+
+            const result = await spawnSubAgent(
+                spec.task,
+                {
+                    ...spec.opts,
+                    systemPromptSuffix: EPISODE_SUFFIX,
+                    defaultCwd: spec.opts.defaultCwd,
+                    defaultModel: spec.opts.defaultModel,
+                    onEvent,
+                },
+                signal ?? spec.signal,
+            );
+
+            const episode = parseEpisode(result, { task: spec.task, agent: spec.agent });
+            results[current] = episode;
+            state.status = "done";
+            state.durationMs = Date.now() - state.startTime;
+            state.cost = episode.cost;
+            state.model = result.model;
+            state.episode = episode;
+            emit();
+        }
+    });
+
+    await Promise.all(workers);
+    return results;
+}
+
+// --- Episode parsing ---
 
 export function parseEpisode(result: SubAgentResult, meta: { task: string; agent: string }): Episode {
     const raw = result.text;
@@ -90,103 +277,4 @@ function countToolCalls(result: SubAgentResult): number {
     return count;
 }
 
-export interface ThreadOptions {
-    agent?: string;
-    model?: string;
-    tools?: string[];
-    timeout?: number;
-}
-
-export interface ThreadState {
-    index: number;
-    task: string;
-    agent: string;
-    status: "pending" | "running" | "done";
-    recentTools: string[];
-    toolCount: number;
-    startTime: number;
-    durationMs: number;
-    cost: number;
-    episode?: Episode;
-}
-
-export type OnDispatchUpdate = (threads: ThreadState[]) => void;
-
-export function createThread(
-    task: string,
-    opts: ThreadOptions & { defaultCwd: string; defaultModel?: string },
-    signal?: AbortSignal,
-    onEvent?: (event: SubAgentEvent) => void,
-): AsyncGenerator<Episode, void, undefined> {
-    return (async function* () {
-        const result = await spawnSubAgent(
-            task,
-            {
-                agent: opts.agent, model: opts.model, tools: opts.tools, timeout: opts.timeout,
-                systemPromptSuffix: EPISODE_SUFFIX,
-                defaultCwd: opts.defaultCwd, defaultModel: opts.defaultModel,
-                onEvent,
-            },
-            signal,
-        );
-        yield parseEpisode(result, { task, agent: opts.agent || "anonymous" });
-    })();
-}
-
-export async function dispatchThreads(
-    threads: AsyncGenerator<Episode, void, undefined>[],
-    concurrency: number = DEFAULT_CONCURRENCY,
-    onUpdate?: OnDispatchUpdate,
-    threadMeta?: Array<{ task: string; agent: string }>,
-): Promise<Episode[]> {
-    const limit = Math.max(1, Math.min(concurrency, MAX_CONCURRENCY));
-    const results: Episode[] = new Array(threads.length);
-    let nextIndex = 0;
-
-    const states: ThreadState[] = threads.map((_, i) => ({
-        index: i,
-        task: threadMeta?.[i]?.task ?? `thread-${i}`,
-        agent: threadMeta?.[i]?.agent ?? "anonymous",
-        status: "pending",
-        recentTools: [],
-        toolCount: 0,
-        startTime: 0,
-        durationMs: 0,
-        cost: 0,
-    }));
-
-    const emit = () => onUpdate?.(states);
-    emit();
-
-    const workers = Array.from({ length: Math.min(limit, threads.length) }, async () => {
-        while (true) {
-            const current = nextIndex++;
-            if (current >= threads.length) return;
-
-            states[current].status = "running";
-            states[current].startTime = Date.now();
-            emit();
-
-            const episodes: Episode[] = [];
-            for await (const ep of threads[current]) episodes.push(ep);
-
-            const episode = episodes[0] || {
-                status: "failure" as const,
-                summary: "Thread produced no episodes",
-                findings: [], artifacts: [], blockers: [],
-                toolCalls: 0, raw: "", task: states[current].task, agent: states[current].agent,
-                model: "unknown", cost: 0, duration: 0,
-            };
-
-            results[current] = episode;
-            states[current].status = "done";
-            states[current].durationMs = Date.now() - states[current].startTime;
-            states[current].cost = episode.cost;
-            states[current].episode = episode;
-            emit();
-        }
-    });
-
-    await Promise.all(workers);
-    return results;
-}
+export { COLLAPSED_ITEM_COUNT };
