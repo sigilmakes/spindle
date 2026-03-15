@@ -5,3 +5,5 @@ dist/
 .env
 ARCHITECTURE.md
 ARCHITECTURE_DIAGRAM.txt
+*.md
+!README.md
