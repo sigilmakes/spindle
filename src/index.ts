@@ -30,6 +30,15 @@ const srcDir = __dirname.endsWith("/dist") || __dirname.endsWith("\\dist")
 setExtensionDir(srcDir);
 
 export default function spindle(pi: ExtensionAPI) {
+    // Register SPINDLE.md as a skill so pi includes it in the system prompt
+    const extensionDir = path.dirname(fileURLToPath(import.meta.url));
+    const skillPath = path.join(extensionDir, "SPINDLE.md");
+    pi.on("resources_discover", () => {
+        if (fs.existsSync(skillPath)) {
+            return { skillPaths: [skillPath] };
+        }
+    });
+
     let repl: Repl | null = null;
     let cwd = process.cwd();
     let subModel: string | undefined;
@@ -222,8 +231,6 @@ export default function spindle(pi: ExtensionAPI) {
             "`await sleep(ms)` for delays.",
             "REPL output truncated to 8192 chars. Store results in variables, console.log what you need.",
             "Execute scripts from files: `spindle_exec({ file: \"path/to/script.js\" })` — runs a .js/.mjs file in the same REPL context with all the same builtins.",
-            "Use the REPL for programmatic tool calling — loops, conditionals, data transformation, multi-step pipelines. Write code that calls tools as functions rather than asking for individual tool calls.",
-            "Use `dispatch()` for parallel sub-agent work. Use direct tool calls (`read`, `grep`, `bash`, etc.) for mechanical work that doesn't need an LLM.",
         ],
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
