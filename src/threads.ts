@@ -112,6 +112,8 @@ export interface ThreadState {
     task: string;
     agent: string;
     status: "pending" | "running" | "done";
+    /** Timestamp when the thread's sub-agent announced it was ready. 0 = not yet started. */
+    announcedAt: number;
     displayItems: DisplayItem[];
     toolCount: number;
     usage: UsageStats;
@@ -149,11 +151,22 @@ export function isThreadSpec(x: unknown): x is ThreadSpec {
     return typeof x === "object" && x !== null && (x as any).__brand === "ThreadSpec";
 }
 
+/** Maximum prompt size for thread/llm tasks. Prompts over this are likely stuffing context that the sub-agent should read itself. */
+export const MAX_TASK_PROMPT_SIZE = 10 * 1024; // 10KB
+
 export function createThreadSpec(
     task: string,
     opts: ThreadOptions & { defaultCwd: string; defaultModel?: string },
     signal?: AbortSignal,
 ): ThreadSpec {
+    if (task.length > MAX_TASK_PROMPT_SIZE) {
+        const trimmed = task.slice(0, MAX_TASK_PROMPT_SIZE);
+        console.warn(
+            `[spindle] Thread prompt is ${(task.length / 1024).toFixed(1)}KB (max ${MAX_TASK_PROMPT_SIZE / 1024}KB). ` +
+            `Pass file paths instead of file contents — sub-agents can read files themselves. Prompt truncated.`,
+        );
+        task = trimmed + `\n\n[prompt truncated at ${MAX_TASK_PROMPT_SIZE / 1024}KB — use file paths, not inline content]`;
+    }
     let generator: AsyncGenerator<Episode, void, undefined> | null = null;
 
     const lazyGen = () => {
@@ -344,6 +357,13 @@ export async function dispatchThreads(
     if (communicate) {
         commServer = new CommServer({
             size: specs.length,
+            onAnnounce(rank) {
+                const s = states[rank];
+                if (s && !s.announcedAt) {
+                    s.announcedAt = Date.now();
+                    emit();
+                }
+            },
             onMessage(from, to, msg) {
                 // Barrier messages have format "barrier:<name> (<arrived>/<total>)"
                 const barrierMatch = msg.match(/^barrier:(\S+) \((\d+)\/(\d+)\)$/);
@@ -412,6 +432,7 @@ export async function dispatchThreads(
         task: spec.task,
         agent: spec.agent,
         status: "pending" as const,
+        announcedAt: 0,
         displayItems: [],
         toolCount: 0,
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -447,6 +468,10 @@ export async function dispatchThreads(
             emit();
 
             const onEvent = (event: SubAgentEvent) => {
+                // Mark announced on first event (for non-communicating dispatches)
+                if (!state.announcedAt) {
+                    state.announcedAt = Date.now();
+                }
                 switch (event.type) {
                     case "tool_start":
                         state.displayItems.push({

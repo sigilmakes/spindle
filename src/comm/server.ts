@@ -17,6 +17,8 @@ export interface CommServerOptions {
     /** Total number of threads in the dispatch. Required for barriers. */
     size?: number;
     onMessage?: (from: number, to: number | undefined, msg: string) => void;
+    /** Called when a client announces its rank (i.e. the thread has started). */
+    onAnnounce?: (rank: number) => void;
 }
 
 export class CommServer {
@@ -28,6 +30,7 @@ export class CommServer {
     private queued = new Map<number, Buffer[]>();
     private size: number;
     private onMessage?: (from: number, to: number | undefined, msg: string) => void;
+    private onAnnounce?: (rank: number) => void;
 
     /** Tracks which ranks have arrived at each named barrier. */
     private barriers = new Map<string, Set<number>>();
@@ -35,6 +38,7 @@ export class CommServer {
     constructor(options?: CommServerOptions) {
         this.size = options?.size ?? 0;
         this.onMessage = options?.onMessage;
+        this.onAnnounce = options?.onAnnounce;
     }
 
     async start(): Promise<string> {
@@ -99,6 +103,7 @@ export class CommServer {
                     const client: RankedClient = { rank: msg.from, socket, decoder };
                     this.clients.set(msg.from, client);
                     this.flushQueued(msg.from, socket);
+                    this.onAnnounce?.(msg.from);
                 } else {
                     this.route(msg);
                 }
