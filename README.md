@@ -50,6 +50,45 @@ critical = research.flatMap(ep => ep.findings).filter(f => /critical/i.test(f))
 console.log(critical.length + " critical issues")
 ```
 
+## Programmatic sub-agents
+
+Dispatch sub-agents using for loops and templates rather than manual prompting
+
+```javascript
+// Define exploration targets
+const targets = [
+  { name: "documents", path: "Documents", desc: "PDFs, spreadsheets, and project notes" },
+  { name: "downloads", path: "Downloads", desc: "Recent installers, temporary files, and incoming media" },
+  { name: "music",     path: "Music",     desc: "Audio library, playlists, and production assets" }
+];
+
+const threads = targets.map(t => thread(
+  `Explore the folder at $HOME/${t.path}.
+   This covers: ${t.desc}.
+
+   1. List all files recursively (skip hidden files and cache).
+   2. Identify key file types (docs, media, archives).
+   3. Return a concise summary: organization style, disk usage, and notable files.
+   Keep it tight — bullet points, not essays.`,
+  { name: `scout-${t.name}` }
+));
+
+const episodes = await dispatch(threads);
+
+// Store results
+const findings = {};
+for (let i = 0; i < targets.length; i++) {
+  findings[targets[i].name] = {
+    status: episodes[i].status,
+    summary: episodes[i].summary,
+    detail: episodes[i].findings || []
+  };
+}
+
+// Show status
+episodes.forEach((ep, i) => console.log(`${targets[i].name}: ${ep.status}`));
+```
+
 ## Thread communication
 
 Threads can exchange messages during execution via ranks:
