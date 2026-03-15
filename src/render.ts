@@ -17,7 +17,7 @@ export interface SpindleStatusDetails {
     config: { subModel: string | undefined; outputLimit: number; timeoutMs: number };
 }
 
-export function formatCodeForDisplay(code: string, theme: Theme, maxLines = 15): string {
+export function formatCodeForDisplay(code: string, theme: Theme): string {
     let highlighted: string[];
     try {
         highlighted = highlightCode(code, "javascript");
@@ -26,11 +26,8 @@ export function formatCodeForDisplay(code: string, theme: Theme, maxLines = 15):
     }
 
     let text = theme.fg("toolTitle", theme.bold("spindle_exec")) + "\n";
-    for (const line of highlighted.slice(0, maxLines)) {
+    for (const line of highlighted) {
         text += "  " + line + "\n";
-    }
-    if (highlighted.length > maxLines) {
-        text += theme.fg("muted", `  ... ${highlighted.length - maxLines} more lines`);
     }
     return text.trimEnd();
 }

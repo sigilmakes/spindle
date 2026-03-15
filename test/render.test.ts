@@ -40,10 +40,12 @@ describe("formatCodeForDisplay", () => {
         expect(result).toContain('console.log("hi")');
     });
 
-    it("truncates code beyond maxLines", () => {
+    it("shows all code lines without truncation", () => {
         const lines = Array.from({ length: 30 }, (_, i) => `line${i}`).join("\n");
-        const result = formatCodeForDisplay(lines, theme, 15);
-        expect(result).toContain("15 more lines");
+        const result = formatCodeForDisplay(lines, theme);
+        expect(result).toContain("line0");
+        expect(result).toContain("line29");
+        expect(result).not.toContain("more lines");
     });
 
     it("handles empty code", () => {
