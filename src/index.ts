@@ -330,6 +330,6 @@ export default function spindle(pi: ExtensionAPI) {
 export { Repl } from "./repl.js";
 export { createToolWrappers, createFileIO, load, save } from "./tools.js";
 export { spawnSubAgent, discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
-export { createThreadSpec, dispatchThreads, parseEpisode, EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
+export { createThreadSpec, dispatchThreads, parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
 export type { Episode, ThreadOptions, ThreadSpec, ThreadState, DisplayItem } from "./threads.js";
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";
