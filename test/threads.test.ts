@@ -88,6 +88,13 @@ blockers:
         const text = "raw\n<episode>\nstatus: success\nsummary: ok\nfindings:\nartifacts:\nblockers:\n</episode>";
         expect(parseEpisode(makeResult(text), { task: "t", agent: "a" }).raw).toBe(text);
     });
+
+    it("grabs the LAST episode block when source code quotes the template", () => {
+        const text = 'Here is the EPISODE_SUFFIX constant:\n```\n<episode>\nstatus: success | failure\nsummary: template\nfindings:\n</episode>\n```\n\nDone analyzing.\n\n<episode>\nstatus: success\nsummary: Actually completed the analysis.\nfindings:\n- Real finding\nartifacts:\nblockers:\n</episode>';
+        const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
+        expect(ep.summary).toBe("Actually completed the analysis.");
+        expect(ep.findings).toEqual(["Real finding"]);
+    });
 });
 
 describe("EPISODE_SUFFIX", () => {

@@ -253,7 +253,9 @@ export async function dispatchThreads(
 
 export function parseEpisode(result: SubAgentResult, meta: { task: string; agent: string }): Episode {
     const raw = result.text;
-    const match = raw.match(/<episode>([\s\S]*?)<\/episode>/);
+    // Grab the LAST episode block — agents may quote the template when reading our source
+    const allMatches = [...raw.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
+    const match = allMatches.length > 0 ? allMatches[allMatches.length - 1] : null;
 
     const base = {
         toolCalls: countToolCalls(result),
