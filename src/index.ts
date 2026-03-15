@@ -18,6 +18,34 @@ import {
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
 
+/** Default cap on llm() return value (bytes). */
+export const DEFAULT_LLM_MAX_OUTPUT = 50 * 1024; // 50KB
+
+/**
+ * Truncate an LLM output string to `max` characters, preserving a head+tail
+ * window so the caller can still see how the response started and ended.
+ *
+ * If `max` is `false` or `Infinity`, no truncation is applied.
+ * Returns the original string when it fits within the limit.
+ */
+export function truncateLlmOutput(
+    text: string,
+    max: number | false | undefined,
+    defaultMax: number = DEFAULT_LLM_MAX_OUTPUT,
+): string {
+    const limit = max === false ? Infinity : (max ?? defaultMax);
+    if (!Number.isFinite(limit) || text.length <= limit) return text;
+    const headSize = Math.floor(limit * 0.7);
+    const tailSize = Math.floor(limit * 0.3);
+    const head = text.slice(0, headSize);
+    const tail = text.slice(-tailSize);
+    return (
+        head +
+        `\n\n... [truncated: ${text.length} total chars, showing first ${headSize} + last ${tailSize}. Use { maxOutput: false } for full output] ...\n\n` +
+        tail
+    );
+}
+
 // Register the extension directory so sub-agents can be spawned with --extension
 // pointing back at this extension's source entry point.
 const __filename = fileURLToPath(import.meta.url);
@@ -60,7 +88,11 @@ export default function spindle(pi: ExtensionAPI) {
         r.inject({ load: fileIO.load, save: fileIO.save });
 
         r.inject({
-            llm: async (prompt: string, opts?: { agent?: string; model?: string; tools?: string[]; timeout?: number; spindle?: boolean }) => {
+            llm: async (prompt: string, opts?: {
+                agent?: string; model?: string; tools?: string[];
+                timeout?: number; spindle?: boolean;
+                maxOutput?: number | false;
+            }) => {
                 const result = await spawnSubAgent(prompt, {
                     agent: opts?.agent, model: opts?.model ?? subModel,
                     tools: opts?.tools, timeout: opts?.timeout,
@@ -70,7 +102,7 @@ export default function spindle(pi: ExtensionAPI) {
                 cumulativeUsage.totalCost += result.usage.cost;
                 cumulativeUsage.totalLlmCalls++;
                 if (result.error) throw new Error(result.error);
-                return result.text;
+                return truncateLlmOutput(result.text, opts?.maxOutput);
             },
         });
 
@@ -223,6 +255,7 @@ export default function spindle(pi: ExtensionAPI) {
             "`await load(path)` loads a file (→ string) or directory (→ Map) into a variable without entering context.",
             "`await save(path, content)` writes data out without entering context.",
             "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout?, spindle? })` → string.",
+            "llm() output is capped at 50KB by default. Use `{ maxOutput: false }` for full output, or `{ maxOutput: N }` for a custom byte limit.",
             "Threads: `thread(task, opts?)` → AsyncGenerator<Episode>. `await dispatch([thread(...), ...])` → Episode[].",
             "Episodes have: status, summary, findings, artifacts, blockers, cost, duration.",
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
@@ -416,7 +449,7 @@ export default function spindle(pi: ExtensionAPI) {
 }
 
 export { Repl } from "./repl.js";
-export { createToolWrappers, createFileIO, load, save } from "./tools.js";
+export { createToolWrappers, createFileIO, load, save, FileConflictError, guardedWrite, createMtimeGuardedEditOperations, getMtimeMap } from "./tools.js";
 export { spawnSubAgent, discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
 export { createThreadSpec, dispatchThreads, parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
 export type { Episode, ThreadOptions, ThreadSpec, ThreadState, DisplayItem } from "./threads.js";
