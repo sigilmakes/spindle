@@ -203,6 +203,45 @@ describe("CommServer + CommClient", () => {
         expect(msg.msg).toBe("early message");
     });
 
+    it("fires onMessage callback for send", async () => {
+        const messages: Array<{ from: number; to: number | undefined; msg: string }> = [];
+        const server = trackServer(new CommServer({
+            onMessage(from, to, msg) { messages.push({ from, to, msg }); },
+        }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+
+        c0.send(1, "hello");
+        await c1.recv();
+
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toEqual({ from: 0, to: 1, msg: "hello" });
+    });
+
+    it("fires onMessage callback for broadcast with to=undefined", async () => {
+        const messages: Array<{ from: number; to: number | undefined; msg: string }> = [];
+        const server = trackServer(new CommServer({
+            onMessage(from, to, msg) { messages.push({ from, to, msg }); },
+        }));
+        await server.start();
+
+        const c0 = trackClient(new CommClient(0));
+        const c1 = trackClient(new CommClient(1));
+        await c0.connect(server.path!);
+        await c1.connect(server.path!);
+        await new Promise(r => setTimeout(r, 20));
+
+        c0.broadcast("hey all");
+        await c1.recv();
+
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toEqual({ from: 0, to: undefined, msg: "hey all" });
+    });
+
     it("cleans up on stop", async () => {
         const server = new CommServer();
         const sockPath = await server.start();

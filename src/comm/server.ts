@@ -13,6 +13,10 @@ interface RankedClient {
     decoder: FrameDecoder;
 }
 
+export interface CommServerOptions {
+    onMessage?: (from: number, to: number | undefined, msg: string) => void;
+}
+
 export class CommServer {
     private server: net.Server | null = null;
     private dir: string | null = null;
@@ -20,6 +24,11 @@ export class CommServer {
     private clients = new Map<number, RankedClient>();
     private pendingSockets = new Set<net.Socket>();
     private queued = new Map<number, Buffer[]>();
+    private onMessage?: (from: number, to: number | undefined, msg: string) => void;
+
+    constructor(options?: CommServerOptions) {
+        this.onMessage = options?.onMessage;
+    }
 
     async start(): Promise<string> {
         this.dir = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-comm-"));
@@ -109,8 +118,10 @@ export class CommServer {
 
     private route(msg: CommMessage): void {
         if (msg.type === "send" && msg.to !== undefined) {
+            this.onMessage?.(msg.from, msg.to, msg.msg || "");
             this.sendTo(msg.to, msg);
         } else if (msg.type === "broadcast") {
+            this.onMessage?.(msg.from, undefined, msg.msg || "");
             const frame = encode(msg);
             for (const [rank, client] of this.clients) {
                 if (rank !== msg.from) {

@@ -160,6 +160,57 @@ describe("formatExecResult", () => {
         expect(text).toContain("scout-7");
     });
 
+    it("renders comm sent items with peer rank", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 1000,
+                displayItems: [
+                    { type: "comm", direction: "sent", peer: 1, msg: "changed interface" },
+                ],
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("→ rank 1: changed interface");
+    });
+
+    it("renders comm received items with peer rank", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                index: 1, status: "running", startTime: Date.now() - 1000,
+                displayItems: [
+                    { type: "comm", direction: "received", peer: 0, msg: "here are the fields" },
+                ],
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("← rank 0: here are the fields");
+    });
+
+    it("renders comm broadcast sent as 'all'", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 1000,
+                displayItems: [
+                    { type: "comm", direction: "sent", peer: -1, msg: "status update" },
+                ],
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("→ all: status update");
+    });
+
     it("shows thinking text", () => {
         const states: ThreadState[] = [
             makeThreadState({

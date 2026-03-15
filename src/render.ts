@@ -123,6 +123,13 @@ function formatThreadColumn(state: ThreadState, expanded: boolean, theme: Theme)
             const check = item.done ? theme.fg("success", " ✓") : "";
             const prefix = item.done ? theme.fg("muted", "→ ") : theme.fg("dim", "→ ");
             col += "\n  " + prefix + formatToolCall(item.name, item.args, theme) + check;
+        } else if (item.type === "comm") {
+            if (item.direction === "sent") {
+                const target = item.peer === -1 ? "all" : `rank ${item.peer}`;
+                col += "\n  " + theme.fg("muted", "→ ") + theme.fg("accent", target) + theme.fg("dim", `: ${item.msg}`);
+            } else {
+                col += "\n  " + theme.fg("muted", "← ") + theme.fg("accent", `rank ${item.peer}`) + theme.fg("dim", `: ${item.msg}`);
+            }
         } else {
             col += "\n  " + theme.fg("dim", item.text);
         }

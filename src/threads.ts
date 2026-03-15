@@ -70,7 +70,8 @@ const COLLAPSED_ITEM_COUNT = 10;
 
 export type DisplayItem =
     | { type: "text"; text: string }
-    | { type: "toolCall"; name: string; args: Record<string, unknown>; done: boolean };
+    | { type: "toolCall"; name: string; args: Record<string, unknown>; done: boolean }
+    | { type: "comm"; direction: "sent" | "received"; peer: number; msg: string };
 
 export interface ThreadState {
     index: number;
@@ -309,7 +310,49 @@ export async function dispatchThreads(
     let commServer: CommServer | null = null;
     let commSocketPath: string | null = null;
     if (communicate) {
-        commServer = new CommServer();
+        commServer = new CommServer({
+            onMessage(from, to, msg) {
+                // Truncate message for display
+                const preview = msg.length > 60 ? msg.slice(0, 60) + "..." : msg;
+
+                // Add "sent" item to sender's column
+                const sender = states[from];
+                if (sender) {
+                    sender.displayItems.push({
+                        type: "comm",
+                        direction: "sent",
+                        peer: to ?? -1,
+                        msg: preview,
+                    });
+                }
+
+                // Add "received" item to recipient(s)
+                if (to !== undefined) {
+                    const receiver = states[to];
+                    if (receiver) {
+                        receiver.displayItems.push({
+                            type: "comm",
+                            direction: "received",
+                            peer: from,
+                            msg: preview,
+                        });
+                    }
+                } else {
+                    // Broadcast — add received to all except sender
+                    for (const state of states) {
+                        if (state.index !== from) {
+                            state.displayItems.push({
+                                type: "comm",
+                                direction: "received",
+                                peer: from,
+                                msg: preview,
+                            });
+                        }
+                    }
+                }
+                emit();
+            },
+        });
         commSocketPath = await commServer.start();
     }
 
