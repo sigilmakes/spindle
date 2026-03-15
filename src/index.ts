@@ -298,8 +298,8 @@ export default function spindle(pi: ExtensionAPI) {
             file: Type.Optional(Type.String({ description: "Path to a .js or .mjs file to execute (alternative to code)" })),
         }),
         promptGuidelines: [
-            "You have a persistent JavaScript REPL via `spindle_exec`. Variables persist across calls (use plain assignment, not const/let).",
-            "**Use spindle_exec for file edits and writes.** The REPL's `edit()` and `write()` have cross-process file locking. The native edit/write tools do not. Use `await edit({path, oldText, newText})` and `await write({path, content})` inside spindle_exec instead of calling the native tools directly.",
+            "**Use `spindle_exec` for everything.** Do not call native tools (read, edit, write, bash, grep, find, ls) directly — use their REPL equivalents inside `spindle_exec`. The REPL has file locking, persistent variables, and all the same tools as builtins.",
+            "Variables persist across `spindle_exec` calls (use plain assignment, not const/let).",
             "Built-in tools: `await read({path})`, `await bash({command})`, `await grep({pattern, path})`, `await find({pattern, path})`, `await edit({path, oldText, newText})`, `await write({path, content})`, `await ls({path})`.",
             "  These have pi's truncation limits — use `load()` for full file content.",
             "`await load(path)` loads a file (→ string) or directory (→ Map) into a variable without entering context.",
