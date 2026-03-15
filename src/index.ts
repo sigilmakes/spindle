@@ -263,7 +263,7 @@ export default function spindle(pi: ExtensionAPI) {
             const details: SpindleStatusDetails = {
                 variables,
                 usage: { ...cumulativeUsage },
-                config: { subModel, outputLimit: 8192, timeoutMs: 300_000 },
+                config: { subModel, outputLimit: 8192 },
             };
 
             const varSummary = variables.length > 0
@@ -274,7 +274,7 @@ export default function spindle(pi: ExtensionAPI) {
                 content: [{ type: "text", text: [
                     "Spindle Status", "", "Variables:", varSummary, "",
                     `Usage: ${cumulativeUsage.totalLlmCalls} LLM calls, ${cumulativeUsage.totalEpisodes} episodes, $${cumulativeUsage.totalCost.toFixed(4)}`,
-                    `Config: sub-model=${subModel || "(default)"}, output-limit=8192, timeout=300s`,
+                    `Config: sub-model=${subModel || "(default)"}, output-limit=8192`,
                 ].join("\n") }],
                 details,
             };

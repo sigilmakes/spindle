@@ -1,11 +1,9 @@
 import * as vm from "node:vm";
 
 const DEFAULT_OUTPUT_LIMIT = 8192;
-const DEFAULT_TIMEOUT_MS = 300_000;
 
 export interface ReplConfig {
     outputLimit: number;
-    timeoutMs: number;
 }
 
 export interface ExecResult {
@@ -24,7 +22,6 @@ export class Repl {
     constructor(config?: Partial<ReplConfig>) {
         this.config = {
             outputLimit: config?.outputLimit ?? DEFAULT_OUTPUT_LIMIT,
-            timeoutMs: config?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         };
         this.context = this.createContext();
     }
@@ -74,18 +71,8 @@ export class Repl {
             const script = new vm.Script(wrapped, { filename: "spindle-repl" });
             const execPromise = script.runInContext(this.context);
 
-            const timeoutPromise = new Promise<never>((_, reject) => {
-                const timer = setTimeout(
-                    () => reject(new Error(`Execution timed out after ${this.config.timeoutMs}ms`)),
-                    this.config.timeoutMs,
-                );
-                execPromise.then(() => clearTimeout(timer), () => clearTimeout(timer));
-            });
-
-            const racers: Promise<unknown>[] = [execPromise, timeoutPromise];
-
             if (signal) {
-                racers.push(new Promise<never>((_, reject) => {
+                const abortPromise = new Promise<never>((_, reject) => {
                     if (signal.aborted) { reject(new Error("Execution aborted")); return; }
                     const onAbort = () => reject(new Error("Execution aborted"));
                     signal.addEventListener("abort", onAbort, { once: true });
@@ -93,10 +80,11 @@ export class Repl {
                         () => signal.removeEventListener("abort", onAbort),
                         () => signal.removeEventListener("abort", onAbort),
                     );
-                }));
+                });
+                returnValue = await Promise.race([execPromise, abortPromise]);
+            } else {
+                returnValue = await execPromise;
             }
-
-            returnValue = await Promise.race(racers);
         } catch (err: unknown) {
             error = formatError(err);
         }

@@ -218,7 +218,7 @@ describe("formatStatusResult", () => {
         const details: SpindleStatusDetails = {
             variables: [{ name: "x", type: "number", preview: "42" }],
             usage: { totalCost: 0.05, totalEpisodes: 3, totalLlmCalls: 7 },
-            config: { subModel: "fast-model", outputLimit: 8192, timeoutMs: 300000 },
+            config: { subModel: "fast-model", outputLimit: 8192 },
         };
         const text = formatStatusResult(details, theme);
         expect(text).toContain("x");
@@ -230,7 +230,7 @@ describe("formatStatusResult", () => {
         const details: SpindleStatusDetails = {
             variables: [],
             usage: { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 },
-            config: { subModel: undefined, outputLimit: 8192, timeoutMs: 300000 },
+            config: { subModel: undefined, outputLimit: 8192 },
         };
         expect(formatStatusResult(details, theme)).toContain("No variables");
     });

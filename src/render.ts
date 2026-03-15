@@ -15,7 +15,7 @@ export interface SpindleExecDetails {
 export interface SpindleStatusDetails {
     variables: Array<{ name: string; type: string; preview: string }>;
     usage: { totalCost: number; totalEpisodes: number; totalLlmCalls: number };
-    config: { subModel: string | undefined; outputLimit: number; timeoutMs: number };
+    config: { subModel: string | undefined; outputLimit: number };
 }
 
 export function formatCodeForDisplay(code: string, theme: Theme): string {
@@ -253,7 +253,6 @@ export function formatStatusResult(details: SpindleStatusDetails, theme: Theme):
     text += "\n" + theme.fg("muted", "─── Config ───") + "\n";
     text += `  Sub-model: ${details.config.subModel || "(default)"}\n`;
     text += `  Output limit: ${details.config.outputLimit} chars\n`;
-    text += `  Timeout: ${details.config.timeoutMs / 1000}s\n`;
 
     return text;
 }
