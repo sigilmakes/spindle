@@ -1,0 +1,24 @@
+{
+    "name": "spindle",
+    "version": "0.1.0",
+    "description": "Agent orchestration extension for pi",
+    "type": "module",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "@mariozechner/pi-coding-agent": "^0.58.1",
+        "@mariozechner/pi-agent-core": "^0.58.1",
+        "@mariozechner/pi-ai": "^0.58.1",
+        "@mariozechner/pi-tui": "^0.58.1",
+        "@sinclair/typebox": "^0.34.48"
+    },
+    "devDependencies": {
+        "typescript": "^5.7.0",
+        "vitest": "^3.0.0"
+    },
+    "license": "MIT"
+}
