@@ -224,6 +224,25 @@ describe("formatExecResult", () => {
         };
         expect(formatExecResult(result, false, theme)).toContain("Let me analyze");
     });
+
+    it("renders warning display items", () => {
+        const states: ThreadState[] = [
+            makeThreadState({
+                status: "running", startTime: Date.now() - 1000,
+                displayItems: [
+                    { type: "toolCall", name: "edit", args: { path: "src/app.ts" }, done: true },
+                    { type: "warning", text: "⚠ File collision: src/app.ts written by threads 0, 1" },
+                ],
+            }),
+        ];
+        const result = {
+            content: [{ type: "text" as const, text: "" }],
+            details: { code: "x", durationMs: 100, error: false, threadStates: states } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("File collision");
+        expect(text).toContain("src/app.ts");
+    });
 });
 
 describe("formatDispatchUpdate", () => {
@@ -261,6 +280,27 @@ describe("formatDispatchUpdate", () => {
         expect(text).toContain("1 done");
         expect(text).toContain("1 running");
         expect(text).toContain("1 pending");
+    });
+
+    it("shows file collision warnings", () => {
+        const text = formatDispatchUpdate([
+            makeThreadState({
+                status: "done", durationMs: 2000, episode: makeEpisode(),
+                displayItems: [
+                    { type: "warning", text: "⚠ File collision: src/app.ts written by threads 0, 1" },
+                ],
+            }),
+            makeThreadState({
+                index: 1, status: "done", durationMs: 3000, episode: makeEpisode(),
+                displayItems: [
+                    { type: "warning", text: "⚠ File collision: src/app.ts written by threads 0, 1" },
+                ],
+            }),
+        ]);
+        expect(text).toContain("File collision");
+        // Should deduplicate — same warning on both threads shown once
+        const matches = text.match(/File collision/g);
+        expect(matches).toHaveLength(1);
     });
 });
 

@@ -1,5 +1,6 @@
 import { spawnSubAgent, type SubAgentEvent, type SubAgentResult, type UsageStats } from "./agents.js";
 import { CommServer } from "./comm/index.js";
+import { FileCollisionTracker, extractWritePaths } from "./file-collision-tracker.js";
 
 export interface Episode {
     status: "success" | "failure" | "blocked" | "running";
@@ -7,6 +8,7 @@ export interface Episode {
     findings: string[];
     artifacts: string[];
     blockers: string[];
+    warnings?: string[];
     toolCalls: number;
     raw: string;
     task: string;
@@ -70,6 +72,20 @@ const COLLAPSED_ITEM_COUNT = 10;
 /** Maximum size for episode.raw (50KB). */
 export const MAX_RAW_SIZE = 50 * 1024;
 
+/** Threshold for aggregate output warning in dispatch (100MB). */
+export const MEMORY_WARNING_THRESHOLD = 100 * 1024 * 1024;
+
+/** Output size threshold for showing bytes in stats line (100KB). */
+const OUTPUT_DISPLAY_THRESHOLD = 100 * 1024;
+
+/** Format byte count as human-readable string. */
+export function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+}
+
 /**
  * Truncate raw text with head+tail preservation.
  * The 70/30 split keeps context at the start (where the agent describes
@@ -87,7 +103,8 @@ export function truncateRaw(text: string, max: number = MAX_RAW_SIZE): string {
 export type DisplayItem =
     | { type: "text"; text: string }
     | { type: "toolCall"; name: string; args: Record<string, unknown>; done: boolean }
-    | { type: "comm"; direction: "sent" | "received"; peer: number; msg: string };
+    | { type: "comm"; direction: "sent" | "received"; peer: number; msg: string }
+    | { type: "warning"; text: string };
 
 export interface ThreadState {
     index: number;
@@ -102,6 +119,7 @@ export interface ThreadState {
     cost: number;
     model?: string;
     episode?: Episode;
+    outputBytes: number;
 }
 
 export interface ThreadOptions {
@@ -368,6 +386,8 @@ export async function dispatchThreads(
         commSocketPath = await commServer.start();
     }
 
+    const collisionTracker = new FileCollisionTracker();
+
     const states: ThreadState[] = specs.map((spec, i) => ({
         index: i,
         task: spec.task,
@@ -379,10 +399,27 @@ export async function dispatchThreads(
         startTime: 0,
         durationMs: 0,
         cost: 0,
+        outputBytes: 0,
     }));
 
     const emit = () => onUpdate?.(states);
+    let memoryWarningEmitted = false;
     emit();
+
+    const checkMemoryThreshold = () => {
+        if (memoryWarningEmitted) return;
+        const totalBytes = states.reduce((sum, s) => sum + s.outputBytes, 0);
+        if (totalBytes >= MEMORY_WARNING_THRESHOLD) {
+            memoryWarningEmitted = true;
+            const warning = `⚠ High memory: ${formatBytes(totalBytes)} aggregate output across ${specs.length} threads`;
+            for (const s of states) {
+                if (s.status === "running") {
+                    s.displayItems.push({ type: "warning", text: warning });
+                }
+            }
+            emit();
+        }
+    };
 
     const workers = specs.map(async (spec, current) => {
             const state = states[current];
@@ -400,11 +437,28 @@ export async function dispatchThreads(
                         break;
                     case "tool_end": {
                         // Mark the most recent matching tool call as done
+                        let matchedArgs: Record<string, unknown> | undefined;
                         for (let i = state.displayItems.length - 1; i >= 0; i--) {
                             const item = state.displayItems[i];
                             if (item.type === "toolCall" && item.name === event.toolName && !item.done) {
                                 item.done = true;
+                                matchedArgs = item.args;
                                 break;
+                            }
+                        }
+
+                        // Track file writes for collision detection
+                        if (matchedArgs && (event.toolName === "edit" || event.toolName === "write")) {
+                            const paths = extractWritePaths(event.toolName, matchedArgs);
+                            for (const p of paths) {
+                                const warning = collisionTracker.recordWrite(current, p);
+                                if (warning) {
+                                    // Add warning to all involved threads
+                                    const writers = collisionTracker.getWriters(p);
+                                    for (const idx of writers) {
+                                        states[idx].displayItems.push({ type: "warning", text: `⚠ ${warning}` });
+                                    }
+                                }
                             }
                         }
                         break;
@@ -436,6 +490,10 @@ export async function dispatchThreads(
                         break;
                     case "turn":
                         if (event.usage) state.usage = { ...event.usage };
+                        if (event.outputBytes !== undefined) {
+                            state.outputBytes = event.outputBytes;
+                            checkMemoryThreshold();
+                        }
                         break;
                 }
                 state.durationMs = Date.now() - state.startTime;
@@ -462,12 +520,21 @@ export async function dispatchThreads(
             );
 
             const episode = parseEpisode(result, { task: spec.task, agent: spec.agent });
+            // Attach any collision warnings relevant to this thread
+            const threadWarnings = state.displayItems
+                .filter((item): item is DisplayItem & { type: "warning" } => item.type === "warning")
+                .map(item => item.text);
+            if (threadWarnings.length > 0) {
+                episode.warnings = threadWarnings;
+            }
             results[current] = episode;
             state.status = "done";
             state.durationMs = Date.now() - state.startTime;
             state.cost = episode.cost;
             state.model = result.model;
             state.episode = episode;
+            state.outputBytes = result.outputBytes;
+            checkMemoryThreshold();
             emit();
     });
 

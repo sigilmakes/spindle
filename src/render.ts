@@ -130,6 +130,8 @@ function formatThreadColumn(state: ThreadState, expanded: boolean, theme: Theme)
             } else {
                 col += "\n  " + theme.fg("muted", "← ") + theme.fg("accent", `rank ${item.peer}`) + theme.fg("dim", `: ${item.msg}`);
             }
+        } else if (item.type === "warning") {
+            col += "\n  " + theme.fg("warning", item.text);
         } else {
             col += "\n  " + theme.fg("dim", item.text);
         }
@@ -168,6 +170,16 @@ export function formatDispatchUpdate(threads: ThreadState[]): string {
         .map(t => t.status === "done" ? t.durationMs : Date.now() - t.startTime));
     text += ` (${(elapsed / 1000).toFixed(0)}s)`;
 
+    // Collect warnings across all threads
+    const warnings: string[] = [];
+    for (const t of threads) {
+        for (const item of t.displayItems) {
+            if (item.type === "warning" && !warnings.includes(item.text)) {
+                warnings.push(item.text);
+            }
+        }
+    }
+
     for (const t of threads) {
         const icon = t.status === "done" ? "✓" : t.status === "running" ? "○" : "·";
         text += `\n  ${icon} ${t.agent}: `;
@@ -177,6 +189,13 @@ export function formatDispatchUpdate(threads: ThreadState[]): string {
             text += `${t.toolCount} tools, ${((Date.now() - t.startTime) / 1000).toFixed(0)}s`;
         } else {
             text += "pending";
+        }
+    }
+
+    if (warnings.length > 0) {
+        text += "\n";
+        for (const w of warnings) {
+            text += `\n  ${w}`;
         }
     }
 
