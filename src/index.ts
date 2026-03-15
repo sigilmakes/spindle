@@ -10,8 +10,9 @@ import { createToolWrappers, createFileIO } from "./tools.js";
 import { spawnSubAgent, killAllSubAgents, setExtensionDir } from "./agents.js";
 import {
     createThreadSpec, dispatchThreads, isThreadSpec,
-    type Episode, type ThreadOptions, type ThreadSpec, type ThreadState,
+    type Episode, type ThreadOptions, type ThreadSpec, type ThreadState, type DispatchOptions,
 } from "./threads.js";
+import { CommClient } from "./comm/index.js";
 import {
     formatCodeForDisplay, formatFileExecForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
     type SpindleExecDetails, type SpindleStatusDetails,
@@ -68,7 +69,7 @@ export default function spindle(pi: ExtensionAPI) {
             thread: (task: string, opts?: ThreadOptions) =>
                 createThreadSpec(task, { ...opts, defaultCwd: cwd, defaultModel: subModel }, currentSignal),
 
-            dispatch: async (specs: ThreadSpec[], concurrency?: number) => {
+            dispatch: async (specs: ThreadSpec[], opts?: { concurrency?: number; communicate?: boolean }) => {
                 const onUpdate = currentOnUpdate;
                 const code = currentCode;
                 const signal = currentSignal;
@@ -89,7 +90,12 @@ export default function spindle(pi: ExtensionAPI) {
                     });
                 };
 
-                const episodes = await dispatchThreads(specs, concurrency, onDispatchUpdate, signal);
+                const episodes = await dispatchThreads(
+                    specs,
+                    { concurrency: opts?.concurrency, communicate: opts?.communicate },
+                    onDispatchUpdate,
+                    signal,
+                );
                 for (const ep of episodes) {
                     cumulativeUsage.totalCost += ep.cost;
                     cumulativeUsage.totalEpisodes++;
@@ -106,7 +112,9 @@ export default function spindle(pi: ExtensionAPI) {
         return r;
     }
 
-    pi.on("session_start", (_event, ctx) => {
+    let commClient: CommClient | null = null;
+
+    pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
 
         const entries = ctx.sessionManager.getEntries();
@@ -117,9 +125,79 @@ export default function spindle(pi: ExtensionAPI) {
                 break;
             }
         }
+
+        // If we're a sub-agent in a communicating dispatch, connect and register comm tools
+        const commPath = process.env.SPINDLE_COMM;
+        const rankStr = process.env.SPINDLE_RANK;
+        const sizeStr = process.env.SPINDLE_SIZE;
+
+        if (commPath && rankStr && sizeStr) {
+            const rank = parseInt(rankStr, 10);
+            const size = parseInt(sizeStr, 10);
+
+            commClient = new CommClient(rank);
+            try {
+                await commClient.connect(commPath);
+            } catch {
+                commClient = null;
+                return;
+            }
+
+            const client = commClient;
+
+            pi.registerTool({
+                name: "spindle_send",
+                label: "Send",
+                description: `Send a message to another thread by rank. You are rank ${rank} of ${size}.`,
+                parameters: Type.Object({
+                    to: Type.Number({ description: "Destination thread rank" }),
+                    msg: Type.String({ description: "Message to send" }),
+                    data: Type.Optional(Type.Unknown({ description: "Structured data payload" })),
+                }),
+                async execute(_id, params) {
+                    client.send(params.to, params.msg, params.data);
+                    return { content: [{ type: "text", text: `Sent to rank ${params.to}.` }], details: undefined };
+                },
+            });
+
+            pi.registerTool({
+                name: "spindle_recv",
+                label: "Receive",
+                description: `Block until a message arrives from another thread. You are rank ${rank} of ${size}.`,
+                parameters: Type.Object({
+                    from: Type.Optional(Type.Number({ description: "Only receive from this rank" })),
+                }),
+                async execute(_id, params) {
+                    const msg = await client.recv(params.from);
+                    return {
+                        content: [{ type: "text", text: `From rank ${msg.from}: ${msg.msg}${msg.data ? "\nData: " + JSON.stringify(msg.data) : ""}` }],
+                        details: undefined,
+                    };
+                },
+            });
+
+            pi.registerTool({
+                name: "spindle_broadcast",
+                label: "Broadcast",
+                description: `Send a message to all other threads. You are rank ${rank} of ${size}.`,
+                parameters: Type.Object({
+                    msg: Type.String({ description: "Message to broadcast" }),
+                    data: Type.Optional(Type.Unknown({ description: "Structured data payload" })),
+                }),
+                async execute(_id, params) {
+                    client.broadcast(params.msg, params.data);
+                    return { content: [{ type: "text", text: `Broadcast to ${size - 1} threads.` }], details: undefined };
+                },
+            });
+        }
     });
 
-    pi.on("session_shutdown", () => { killAllSubAgents(); repl = null; });
+    pi.on("session_shutdown", () => {
+        killAllSubAgents();
+        commClient?.disconnect();
+        commClient = null;
+        repl = null;
+    });
 
     pi.registerTool({
         name: "spindle_exec",

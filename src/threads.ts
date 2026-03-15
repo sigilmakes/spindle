@@ -1,4 +1,5 @@
 import { spawnSubAgent, type SubAgentEvent, type SubAgentResult, type UsageStats } from "./agents.js";
+import { CommServer } from "./comm/index.js";
 
 export interface Episode {
     status: "success" | "failure" | "blocked" | "running";
@@ -285,17 +286,32 @@ function pruneTextItems(items: DisplayItem[], maxText: number): void {
 
 export type OnDispatchUpdate = (threads: ThreadState[]) => void;
 
+export interface DispatchOptions {
+    concurrency?: number;
+    communicate?: boolean;
+}
+
 export async function dispatchThreads(
     specs: ThreadSpec[],
-    concurrency: number = DEFAULT_CONCURRENCY,
+    options?: DispatchOptions,
     onUpdate?: OnDispatchUpdate,
     signal?: AbortSignal,
 ): Promise<Episode[]> {
     if (specs.length === 0) return [];
 
+    const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+    const communicate = options?.communicate ?? false;
     const limit = Math.max(1, Math.min(concurrency, MAX_CONCURRENCY));
     const results: Episode[] = new Array(specs.length);
     let nextIndex = 0;
+
+    // Start comm server if threads need to communicate
+    let commServer: CommServer | null = null;
+    let commSocketPath: string | null = null;
+    if (communicate) {
+        commServer = new CommServer();
+        commSocketPath = await commServer.start();
+    }
 
     const states: ThreadState[] = specs.map((spec, i) => ({
         index: i,
@@ -376,6 +392,12 @@ export async function dispatchThreads(
                 emit();
             };
 
+            const commEnv = commSocketPath ? {
+                SPINDLE_RANK: String(current),
+                SPINDLE_SIZE: String(specs.length),
+                SPINDLE_COMM: commSocketPath,
+            } : undefined;
+
             const result = await spawnSubAgent(
                 spec.task,
                 {
@@ -384,6 +406,7 @@ export async function dispatchThreads(
                     onEvent,
                     defaultCwd: spec.opts.defaultCwd,
                     defaultModel: spec.opts.defaultModel,
+                    env: commEnv,
                 },
                 signal ?? spec.signal,
             );
@@ -399,8 +422,12 @@ export async function dispatchThreads(
         }
     });
 
-    await Promise.all(workers);
-    return results;
+    try {
+        await Promise.all(workers);
+        return results;
+    } finally {
+        if (commServer) await commServer.stop();
+    }
 }
 
 // --- Episode parsing ---

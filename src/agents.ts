@@ -52,6 +52,7 @@ export interface SpawnOptions {
     cwd?: string;
     timeout?: number;
     spindle?: boolean;
+    env?: Record<string, string>;
     onEvent?: (event: SubAgentEvent) => void;
 }
 
@@ -219,6 +220,7 @@ export async function spawnSubAgent(
                 cwd: options.cwd ?? options.defaultCwd,
                 shell: false,
                 stdio: ["ignore", "pipe", "pipe"],
+                env: options.env ? { ...process.env, ...options.env } : undefined,
             });
             activeProcesses.add(proc);
             let buffer = "";
