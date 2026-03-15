@@ -7,6 +7,7 @@ import {
     FileConflictError, guardedWrite,
     createMtimeGuardedEditOperations, getMtimeMap,
 } from "../src/tools.js";
+import { acquireLock, releaseLock, checkLock, FileLockError } from "../src/locks.js";
 
 describe("load", () => {
     let tmp: string;
@@ -322,5 +323,50 @@ describe("save with mtime guard", () => {
 
         await save("match.txt", "v2", tmp, mtime);
         expect(fs.readFileSync(path.join(tmp, "match.txt"), "utf-8")).toBe("v2");
+    });
+});
+
+describe("file locking integration", () => {
+    let tmp: string;
+    beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-lock-int-")); });
+    afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+    it("save acquires and releases file lock", async () => {
+        const f = path.join(tmp, "locked.txt");
+        fs.writeFileSync(f, "v1");
+
+        await save("locked.txt", "v2", tmp);
+
+        // Lock should be released after save
+        expect(checkLock(f)).toBeNull();
+        expect(fs.readFileSync(f, "utf-8")).toBe("v2");
+    });
+
+    it("save waits for lock held by same process", async () => {
+        const f = path.join(tmp, "busy.txt");
+        fs.writeFileSync(f, "v1");
+
+        // Hold a lock, release it after 50ms
+        acquireLock(f);
+        setTimeout(() => releaseLock(f), 50);
+
+        // save should wait and succeed (timeout is 10s)
+        await save("busy.txt", "v2", tmp);
+        expect(fs.readFileSync(f, "utf-8")).toBe("v2");
+    });
+
+    it("save cleans up lock even on error", async () => {
+        const f = path.join(tmp, "fail.txt");
+        fs.writeFileSync(f, "v1");
+        const r = await load("fail.txt", tmp);
+        const mtime = r.metadata.mtimeMs!;
+
+        // Change mtime to force a FileConflictError inside the lock
+        fs.utimesSync(f, new Date(mtime + 2000), new Date(mtime + 2000));
+
+        await expect(save("fail.txt", "v2", tmp, mtime)).rejects.toThrow(FileConflictError);
+
+        // Lock should still be released
+        expect(checkLock(f)).toBeNull();
     });
 });

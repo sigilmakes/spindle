@@ -7,12 +7,14 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
+import { createDiff, retry, createContextTools } from "./builtins.js";
 import { spawnSubAgent, killAllSubAgents, setExtensionDir } from "./agents.js";
 import {
     createThreadSpec, dispatchThreads, isThreadSpec,
     type Episode, type ThreadOptions, type ThreadSpec, type ThreadState, type DispatchOptions,
 } from "./threads.js";
 import { CommClient } from "./comm/index.js";
+import { setLockNotifier, releaseAllLocks } from "./locks.js";
 import {
     formatCodeForDisplay, formatFileExecForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
     type SpindleExecDetails, type SpindleStatusDetails,
@@ -66,6 +68,21 @@ export default function spindle(pi: ExtensionAPI) {
             return { skillPaths: [skillPath] };
         }
     });
+
+    /** Names of all injected builtins — used by vars()/clear() to exclude from user variables. */
+    const BUILTIN_NAMES = new Set([
+        // vm context primitives
+        "console", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+        "Promise", "URL", "TextEncoder", "TextDecoder",
+        // tool wrappers
+        "read", "bash", "grep", "find", "edit", "write", "ls",
+        // file I/O
+        "load", "save",
+        // orchestration
+        "llm", "thread", "dispatch",
+        // utilities
+        "sleep", "diff", "retry", "vars", "clear",
+    ]);
 
     let repl: Repl | null = null;
     let cwd = process.cwd();
@@ -150,6 +167,12 @@ export default function spindle(pi: ExtensionAPI) {
             sleep: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)),
         });
 
+        // --- Utility builtins: diff, retry, vars, clear ---
+        r.inject({ diff: createDiff(cwd), retry });
+
+        const ctxTools = createContextTools(r, BUILTIN_NAMES);
+        r.inject({ vars: ctxTools.vars, clear: ctxTools.clear });
+
         return r;
     }
 
@@ -185,6 +208,13 @@ export default function spindle(pi: ExtensionAPI) {
             }
 
             const client = commClient;
+
+            // Wire file lock notifications to comm broadcast
+            setLockNotifier((event, filePath) => {
+                try {
+                    client.broadcast(`${event}:${filePath}`);
+                } catch { /* comm may be disconnected */ }
+            });
 
             pi.registerTool({
                 name: "spindle_send",
@@ -252,6 +282,8 @@ export default function spindle(pi: ExtensionAPI) {
 
     pi.on("session_shutdown", () => {
         killAllSubAgents();
+        releaseAllLocks();
+        setLockNotifier(null);
         commClient?.disconnect();
         commClient = null;
         repl = null;
@@ -280,6 +312,9 @@ export default function spindle(pi: ExtensionAPI) {
             "Thread communication: `dispatch([...], { communicate: true })` lets threads send/recv/broadcast to each other by rank during execution.",
             "Barriers: `spindle_barrier({ name: 'phase1' })` blocks until all threads reach it. Use for multi-phase work where phase 2 depends on all threads finishing phase 1.",
             "When dispatching threads, ensure each thread targets different files. Concurrent edits to the same file are detected (FileConflictError) and may cause thread failures.",
+            "`diff(a, b, opts?)` compares two strings or files and returns a unified diff. If args are file paths that exist, reads them first. opts: `{ context?: number }`.",
+            "`await retry(fn, opts?)` retries an async function with exponential backoff. opts: `{ attempts?, delay?, backoff?, onError? }`. Defaults: 3 attempts, 1s delay, 2x backoff.",
+            "`vars()` lists user-defined REPL variables (excludes builtins). `clear(name)` removes a variable.",
             "`await sleep(ms)` for delays.",
             "REPL output truncated to 8192 chars. Store results in variables, console.log what you need.",
             "Execute scripts from files: `spindle_exec({ file: \"path/to/script.js\" })` — runs a .js/.mjs file in the same REPL context with all the same builtins.",
@@ -468,6 +503,8 @@ export default function spindle(pi: ExtensionAPI) {
 }
 
 export { Repl } from "./repl.js";
+export { createDiff, retry, createContextTools } from "./builtins.js";
+export type { RetryOptions } from "./builtins.js";
 export { createToolWrappers, createFileIO, load, save, FileConflictError, guardedWrite, createMtimeGuardedEditOperations, getMtimeMap } from "./tools.js";
 export { spawnSubAgent, discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
 export { createThreadSpec, dispatchThreads, parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, isThreadSpec } from "./threads.js";

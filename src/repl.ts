@@ -105,6 +105,7 @@ export class Repl {
             "Promise", "URL", "TextEncoder", "TextDecoder",
             "read", "bash", "grep", "find", "edit", "write", "ls",
             "load", "save", "llm", "thread", "dispatch", "sleep",
+            "diff", "retry", "vars", "clear",
         ]);
 
         const vars: Array<{ name: string; type: string; preview: string }> = [];
@@ -123,6 +124,7 @@ export class Repl {
         const preserved = [
             "read", "bash", "grep", "find", "edit", "write", "ls",
             "load", "save", "llm", "thread", "dispatch", "sleep",
+            "diff", "retry", "vars", "clear",
         ];
         for (const name of preserved) {
             if (typeof old[name] === "function") {

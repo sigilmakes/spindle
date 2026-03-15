@@ -5,6 +5,7 @@ import {
     createGrepTool, createFindTool, createLsTool,
 } from "@mariozechner/pi-coding-agent";
 import type { EditOperations } from "@mariozechner/pi-coding-agent";
+import { withFileLock, DEFAULT_LOCK_TIMEOUT } from "./locks.js";
 const DEFAULT_MAX_LOAD_SIZE = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -128,10 +129,27 @@ export function createToolWrappers(cwd: string): ToolWrappers {
 
     const wrappers: ToolWrappers = {};
     for (const [name, tool] of Object.entries(tools)) {
-        wrappers[name] = async (args: Record<string, unknown>) => {
-            const result = await tool.execute(`spindle-${name}-${Date.now()}`, args);
-            return extractText(result);
-        };
+        if (name === "edit" || name === "write") {
+            // Wrap file-mutating tools with file locks
+            wrappers[name] = async (args: Record<string, unknown>) => {
+                const filePath = args.path as string | undefined;
+                if (filePath) {
+                    const resolved = path.resolve(cwd, filePath);
+                    return withFileLock(resolved, async () => {
+                        const result = await tool.execute(`spindle-${name}-${Date.now()}`, args);
+                        return extractText(result);
+                    }, { timeout: DEFAULT_LOCK_TIMEOUT });
+                }
+                // No path (shouldn't happen for edit/write, but be safe)
+                const result = await tool.execute(`spindle-${name}-${Date.now()}`, args);
+                return extractText(result);
+            };
+        } else {
+            wrappers[name] = async (args: Record<string, unknown>) => {
+                const result = await tool.execute(`spindle-${name}-${Date.now()}`, args);
+                return extractText(result);
+            };
+        }
     }
     return wrappers;
 }
@@ -193,8 +211,11 @@ export async function load(
 
 export async function save(targetPath: string, content: string, cwd: string, expectedMtimeMs?: number): Promise<void> {
     const resolved = path.resolve(cwd, targetPath);
+    // Ensure parent dirs exist before acquiring lock (lock dir is a sibling of the file)
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
-    guardedWrite(resolved, content, expectedMtimeMs);
+    await withFileLock(resolved, () => {
+        guardedWrite(resolved, content, expectedMtimeMs);
+    }, { timeout: DEFAULT_LOCK_TIMEOUT });
 }
 
 export function createFileIO(cwd: string) {
