@@ -5,6 +5,7 @@ import { type DisplayItem, type Episode, type ThreadState, COLLAPSED_ITEM_COUNT 
 
 export interface SpindleExecDetails {
     code: string;
+    file?: string;
     episodes?: Episode[];
     threadStates?: ThreadState[];
     durationMs?: number;
@@ -30,6 +31,10 @@ export function formatCodeForDisplay(code: string, theme: Theme): string {
         text += "  " + line + "\n";
     }
     return text.trimEnd();
+}
+
+export function formatFileExecForDisplay(file: string, theme: Theme): string {
+    return theme.fg("toolTitle", theme.bold("spindle_exec")) + " " + theme.fg("accent", file);
 }
 
 // --- Tool call formatting (adapted from subagent extension) ---

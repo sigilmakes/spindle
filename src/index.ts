@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { AgentToolUpdateCallback, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
@@ -10,7 +12,7 @@ import {
     type Episode, type ThreadOptions, type ThreadSpec, type ThreadState,
 } from "./threads.js";
 import {
-    formatCodeForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
+    formatCodeForDisplay, formatFileExecForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
 
@@ -111,7 +113,8 @@ export default function spindle(pi: ExtensionAPI) {
         label: "Spindle",
         description: "Execute JavaScript in a persistent REPL with built-in tools, sub-agent orchestration, and file I/O.",
         parameters: Type.Object({
-            code: Type.String({ description: "JavaScript code to execute" }),
+            code: Type.Optional(Type.String({ description: "JavaScript code to execute" })),
+            file: Type.Optional(Type.String({ description: "Path to a .js or .mjs file to execute (alternative to code)" })),
         }),
         promptGuidelines: [
             "You have a persistent JavaScript REPL via `spindle_exec`. Variables persist across calls (use plain assignment, not const/let).",
@@ -125,21 +128,67 @@ export default function spindle(pi: ExtensionAPI) {
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
             "`await sleep(ms)` for delays.",
             "REPL output truncated to 8192 chars. Store results in variables, console.log what you need.",
+            "Execute scripts from files: `spindle_exec({ file: \"path/to/script.js\" })` — runs a .js/.mjs file in the same REPL context with all the same builtins.",
         ],
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
             if (!repl) repl = initRepl(ctx.cwd);
 
+            // Validate: exactly one of code or file must be provided
+            if (!params.code && !params.file) {
+                return {
+                    content: [{ type: "text", text: "Error: Either 'code' or 'file' must be provided." }],
+                    details: { code: "", error: true } satisfies SpindleExecDetails,
+                    isError: true,
+                };
+            }
+            if (params.code && params.file) {
+                return {
+                    content: [{ type: "text", text: "Error: Provide either 'code' or 'file', not both." }],
+                    details: { code: "", error: true } satisfies SpindleExecDetails,
+                    isError: true,
+                };
+            }
+
+            // Resolve code — either inline or from file
+            let code: string;
+            let file: string | undefined;
+
+            if (params.file) {
+                file = params.file;
+                const resolved = path.resolve(ctx.cwd, file);
+
+                if (!/\.(js|mjs)$/.test(resolved)) {
+                    return {
+                        content: [{ type: "text", text: "Error: File must end in .js or .mjs" }],
+                        details: { code: "", file, error: true } satisfies SpindleExecDetails,
+                        isError: true,
+                    };
+                }
+
+                try {
+                    code = fs.readFileSync(resolved, "utf-8");
+                } catch (err: any) {
+                    return {
+                        content: [{ type: "text", text: `Error reading file: ${err.message}` }],
+                        details: { code: "", file, error: true } satisfies SpindleExecDetails,
+                        isError: true,
+                    };
+                }
+            } else {
+                code = params.code!;
+            }
+
             (repl as any).__lastEpisodes = undefined;
             currentOnUpdate = onUpdate;
             currentSignal = signal;
-            currentCode = params.code;
+            currentCode = code;
 
             const abortCleanup = () => killAllSubAgents();
             signal?.addEventListener("abort", abortCleanup, { once: true });
 
             try {
-                const result = await repl.exec(params.code, signal);
+                const result = await repl.exec(code, signal);
                 const episodes: Episode[] = (repl as any).__lastEpisodes || [];
 
                 const parts: string[] = [];
@@ -160,7 +209,8 @@ export default function spindle(pi: ExtensionAPI) {
                 return {
                     content: [{ type: "text", text: parts.join("\n") || "(no output)" }],
                     details: {
-                        code: params.code,
+                        code,
+                        file,
                         episodes: episodes.length > 0 ? episodes : undefined,
                         durationMs: result.durationMs,
                         error: !!result.error,
@@ -175,7 +225,10 @@ export default function spindle(pi: ExtensionAPI) {
         },
 
         renderCall(args, theme) {
-            return new Text(formatCodeForDisplay(args.code, theme), 0, 0);
+            if (args.file) {
+                return new Text(formatFileExecForDisplay(args.file, theme), 0, 0);
+            }
+            return new Text(formatCodeForDisplay(args.code || "", theme), 0, 0);
         },
 
         renderResult(result, options, theme) {
@@ -224,7 +277,7 @@ export default function spindle(pi: ExtensionAPI) {
     });
 
     pi.registerCommand("spindle", {
-        description: "Spindle REPL control — reset, config, or prime for orchestration",
+        description: "Spindle REPL control — reset, config, run scripts, or prime for orchestration",
         async handler(args, ctx) {
             const parts = args.trim().split(/\s+/);
             const sub = parts[0]?.toLowerCase();
@@ -242,10 +295,17 @@ export default function spindle(pi: ExtensionAPI) {
                 } else {
                     ctx.ui.notify("Usage: /spindle config subModel <model>", "warning");
                 }
+            } else if (sub === "run") {
+                const filePath = parts.slice(1).join(" ").trim();
+                if (!filePath) {
+                    ctx.ui.notify("Usage: /spindle run <path.js>", "warning");
+                } else {
+                    pi.sendUserMessage(`Execute this script using spindle_exec with the file parameter:\n\nspindle_exec({ file: ${JSON.stringify(filePath)} })`);
+                }
             } else if (sub === "status") {
                 pi.sendUserMessage("Show Spindle status using the spindle_status tool.");
             } else if (!sub || sub === "help") {
-                ctx.ui.notify("Usage: /spindle <reset|config|status|task>", "info");
+                ctx.ui.notify("Usage: /spindle <reset|config|status|run|task>", "info");
             } else {
                 pi.sendUserMessage(`Use Spindle (spindle_exec) for this task with wave-based orchestration:\n\n${args}`);
             }
