@@ -64,9 +64,13 @@ const srcDir = __dirname.endsWith("/dist") || __dirname.endsWith("\\dist")
 setExtensionDir(srcDir);
 
 export default function spindle(pi: ExtensionAPI) {
-    // Register SPINDLE.md as a skill so pi includes it in the system prompt
+    // Register SPINDLE.md as a skill — check both dev (repo) and installed (extension dir) paths
     const extensionDir = path.dirname(fileURLToPath(import.meta.url));
-    const skillPath = path.join(extensionDir, "..", "skills", "SPINDLE.md");
+    const skillPath = [
+        path.join(extensionDir, "..", "skills", "SPINDLE.md"),  // dev: src/../skills/
+        path.join(extensionDir, "skills", "SPINDLE.md"),        // installed: extension/skills/
+        path.join(extensionDir, "SPINDLE.md"),                  // flat: extension/SPINDLE.md
+    ].find(p => fs.existsSync(p)) ?? path.join(extensionDir, "..", "skills", "SPINDLE.md");
     pi.on("resources_discover", () => {
         if (fs.existsSync(skillPath)) {
             return { skillPaths: [skillPath] };
