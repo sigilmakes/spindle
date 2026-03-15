@@ -328,7 +328,7 @@ export default function spindle(pi: ExtensionAPI) {
             file: Type.Optional(Type.String({ description: "Path to a .js or .mjs file to execute (alternative to code)" })),
         }),
         promptGuidelines: [
-            "Read the /spindle skill for full API reference. Use spindle_exec for all operations — do not call native tools directly.",
+            "Read the /repl skill for full API reference. Use spindle_exec for all operations — do not call native tools directly.",
         ],
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
