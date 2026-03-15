@@ -89,6 +89,14 @@ blockers:
         expect(parseEpisode(makeResult(text), { task: "t", agent: "a" }).raw).toBe(text);
     });
 
+    it("parses intermediate episode blocks with running status override", () => {
+        const text = 'Step 1 done.\n\n<episode>\nstatus: success\nsummary: Completed step 1.\nfindings:\n- Found A\nartifacts:\nblockers:\n</episode>\n\nNow doing step 2...\n\n<episode>\nstatus: success\nsummary: All done.\nfindings:\n- Found B\nartifacts:\nblockers:\n</episode>';
+        // The parser should grab the LAST block for the final episode
+        const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
+        expect(ep.summary).toBe("All done.");
+        expect(ep.findings).toEqual(["Found B"]);
+    });
+
     it("grabs the LAST episode block when source code quotes the template", () => {
         const text = 'Here is the EPISODE_SUFFIX constant:\n```\n<episode>\nstatus: success | failure\nsummary: template\nfindings:\n</episode>\n```\n\nDone analyzing.\n\n<episode>\nstatus: success\nsummary: Actually completed the analysis.\nfindings:\n- Real finding\nartifacts:\nblockers:\n</episode>';
         const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });

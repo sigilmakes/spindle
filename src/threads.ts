@@ -90,14 +90,53 @@ export function createThreadSpec(
     const lazyGen = () => {
         if (!generator) {
             generator = (async function* () {
-                const result = await spawnSubAgent(
+                // V2: yield intermediate episodes as they arrive via a queue
+                const episodeQueue: Episode[] = [];
+                let resolveWaiting: (() => void) | null = null;
+                let done = false;
+
+                const onEvent = (event: SubAgentEvent) => {
+                    if (event.type === "episode_chunk" && event.episodeRaw) {
+                        const match = event.episodeRaw.match(/<episode>([\s\S]*?)<\/episode>/);
+                        if (match) {
+                            const ep = parseEpisodeBlock(match[1], {
+                                task, agent: opts.agent || "anonymous", model: "unknown", cost: 0, duration: 0,
+                            });
+                            ep.status = ep.status === "success" ? "running" : ep.status;
+                            episodeQueue.push(ep);
+                            resolveWaiting?.();
+                        }
+                    }
+                };
+
+                const resultPromise = spawnSubAgent(
                     task,
                     {
                         ...opts, systemPromptSuffix: EPISODE_SUFFIX,
                         defaultCwd: opts.defaultCwd, defaultModel: opts.defaultModel,
+                        onEvent,
                     },
                     signal,
                 );
+
+                // Yield intermediate episodes as they arrive
+                const waitForEpisodeOrDone = () => new Promise<void>(resolve => {
+                    if (episodeQueue.length > 0 || done) { resolve(); return; }
+                    resolveWaiting = resolve;
+                });
+
+                // Don't block — race between intermediate episodes and completion
+                resultPromise.then(() => { done = true; resolveWaiting?.(); });
+
+                while (!done) {
+                    await waitForEpisodeOrDone();
+                    while (episodeQueue.length > 0) {
+                        yield episodeQueue.shift()!;
+                    }
+                }
+
+                // Yield the final episode from the completed result
+                const result = await resultPromise;
                 yield parseEpisode(result, { task, agent: opts.agent || "anonymous" });
             })();
         }
@@ -250,6 +289,28 @@ export async function dispatchThreads(
 }
 
 // --- Episode parsing ---
+
+function parseEpisodeBlock(
+    block: string,
+    meta: { task: string; agent: string; model: string; cost: number; duration: number },
+): Episode {
+    const statusMatch = block.match(/status:\s*(success|failure|blocked)/i);
+    const summaryMatch = block.match(/summary:\s*(.+?)(?=\nfindings:|\nartifacts:|\nblockers:|\n*$)/is);
+    return {
+        status: (statusMatch?.[1]?.toLowerCase() as Episode["status"]) || "success",
+        summary: summaryMatch?.[1]?.trim() || "",
+        findings: parseList(block, "findings"),
+        artifacts: parseList(block, "artifacts"),
+        blockers: parseList(block, "blockers"),
+        toolCalls: 0,
+        raw: block,
+        task: meta.task,
+        agent: meta.agent,
+        model: meta.model,
+        cost: meta.cost,
+        duration: meta.duration,
+    };
+}
 
 export function parseEpisode(result: SubAgentResult, meta: { task: string; agent: string }): Episode {
     const raw = result.text;

@@ -26,11 +26,12 @@ export interface UsageStats {
 }
 
 export interface SubAgentEvent {
-    type: "tool_start" | "tool_end" | "text" | "turn";
+    type: "tool_start" | "tool_end" | "text" | "turn" | "episode_chunk";
     toolName?: string;
     toolArgs?: Record<string, unknown>;
     text?: string;
     usage?: UsageStats;
+    episodeRaw?: string;
 }
 
 export interface SubAgentResult {
@@ -207,6 +208,8 @@ export async function spawnSubAgent(
     let processModel: string | undefined;
     let errorMessage: string | undefined;
     const onEvent = options.onEvent;
+    let emittedEpisodeCount = 0;
+    let accumulatedText = "";
 
     try {
         if (signal?.aborted) throw new Error("Aborted before spawn");
@@ -254,12 +257,25 @@ export async function spawnSubAgent(
                         if (!processModel && msg.model) processModel = msg.model as string;
                         if (msg.errorMessage) errorMessage = msg.errorMessage as string;
 
-                        // Emit text content and usage
                         for (const part of msg.content) {
                             if (part.type === "text") {
                                 onEvent?.({ type: "text", text: part.text });
+                                accumulatedText += part.text;
                             }
                         }
+
+                        // Detect intermediate <episode> blocks in accumulated text
+                        if (onEvent) {
+                            const allBlocks = [...accumulatedText.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
+                            while (emittedEpisodeCount < allBlocks.length) {
+                                onEvent({
+                                    type: "episode_chunk",
+                                    episodeRaw: allBlocks[emittedEpisodeCount][0],
+                                });
+                                emittedEpisodeCount++;
+                            }
+                        }
+
                         onEvent?.({ type: "turn", usage: { ...usage } });
                     }
                 }
