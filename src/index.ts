@@ -69,7 +69,7 @@ export default function spindle(pi: ExtensionAPI) {
             thread: (task: string, opts?: ThreadOptions) =>
                 createThreadSpec(task, { ...opts, defaultCwd: cwd, defaultModel: subModel }, currentSignal),
 
-            dispatch: async (specs: ThreadSpec[], opts?: { concurrency?: number; communicate?: boolean }) => {
+            dispatch: async (specs: ThreadSpec[], opts?: { communicate?: boolean }) => {
                 const onUpdate = currentOnUpdate;
                 const code = currentCode;
                 const signal = currentSignal;
@@ -92,7 +92,7 @@ export default function spindle(pi: ExtensionAPI) {
 
                 const episodes = await dispatchThreads(
                     specs,
-                    { concurrency: opts?.concurrency, communicate: opts?.communicate },
+                    { communicate: opts?.communicate },
                     onDispatchUpdate,
                     signal,
                 );

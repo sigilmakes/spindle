@@ -64,8 +64,7 @@ blockers:
 </episode>
 `.trim();
 
-const DEFAULT_CONCURRENCY = 4;
-const MAX_CONCURRENCY = 8;
+
 const COLLAPSED_ITEM_COUNT = 10;
 
 export type DisplayItem =
@@ -288,7 +287,6 @@ function pruneTextItems(items: DisplayItem[], maxText: number): void {
 export type OnDispatchUpdate = (threads: ThreadState[]) => void;
 
 export interface DispatchOptions {
-    concurrency?: number;
     communicate?: boolean;
 }
 
@@ -300,11 +298,8 @@ export async function dispatchThreads(
 ): Promise<Episode[]> {
     if (specs.length === 0) return [];
 
-    const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
     const communicate = options?.communicate ?? false;
-    const limit = Math.max(1, Math.min(concurrency, MAX_CONCURRENCY));
     const results: Episode[] = new Array(specs.length);
-    let nextIndex = 0;
 
     // Start comm server if threads need to communicate
     let commServer: CommServer | null = null;
@@ -372,12 +367,7 @@ export async function dispatchThreads(
     const emit = () => onUpdate?.(states);
     emit();
 
-    const workers = Array.from({ length: Math.min(limit, specs.length) }, async () => {
-        while (true) {
-            const current = nextIndex++;
-            if (current >= specs.length) return;
-
-            const spec = specs[current];
+    const workers = specs.map(async (spec, current) => {
             const state = states[current];
             state.status = "running";
             state.startTime = Date.now();
@@ -462,7 +452,6 @@ export async function dispatchThreads(
             state.model = result.model;
             state.episode = episode;
             emit();
-        }
     });
 
     try {

@@ -1,6 +1,6 @@
 # Spindle
 
-Agent orchestration extension for [pi](https://github.com/mariozechner/pi). Gives the LLM a persistent JavaScript REPL where sub-agents are callable functions, async generator threads yield structured episodes, and parallel work is dispatched with concurrency control.
+Agent orchestration extension for [pi](https://github.com/mariozechner/pi). Gives the LLM a persistent JavaScript REPL where sub-agents are callable functions, async generator threads yield structured episodes, and parallel work is dispatched.
 
 Based on ideas from [Recursive Language Models](https://arxiv.org/abs/2512.24601) (persistent REPL with variables instead of context stuffing) and [Slate](https://randomlabs.ai/blog/slate) (thread weaving with episode-based checkpoints).
 
@@ -69,7 +69,7 @@ Threads are async generators that yield structured episodes:
 results = await dispatch([
     thread("Find vulnerabilities in src/auth/", { agent: "scout" }),
     thread("Check test coverage for src/auth/", { agent: "scout" }),
-], { concurrency: 4 })
+])
 
 // Each episode has: status, summary, findings, artifacts, blockers, cost, duration
 for (const ep of results) {
@@ -77,7 +77,7 @@ for (const ep of results) {
 }
 ```
 
-Default concurrency is 4, max is 8.
+All threads run in parallel.
 
 ### Thread communication
 
@@ -257,7 +257,7 @@ src/
 ├── repl.ts         — vm.Context with variable persistence, console capture, truncation
 ├── tools.ts        — built-in tool wrappers, load()/save() file I/O
 ├── agents.ts       — sub-agent spawning, agent discovery, JSON streaming, usage tracking
-├── threads.ts      — async generator threads, episode parsing, dispatch concurrency
+├── threads.ts      — async generator threads, episode parsing, parallel dispatch
 ├── render.ts       — renderCall (syntax-highlighted), renderResult (column layout)
 └── comm/
     ├── index.ts    — barrel export
