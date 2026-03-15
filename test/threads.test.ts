@@ -60,7 +60,7 @@ blockers:
         const ep = parseEpisode(makeResult("Just some text"), { task: "t", agent: "a" });
         expect(ep.status).toBe("success");
         expect(ep.summary).toBe("Just some text");
-        expect(ep.raw).toBe("Just some text");
+        expect(ep.output).toBe("Just some text");
     });
 
     it("falls back to failure on non-zero exit", () => {
@@ -88,7 +88,7 @@ blockers:
 
     it("preserves raw output", () => {
         const text = "raw\n<episode>\nstatus: success\nsummary: ok\nfindings:\nartifacts:\nblockers:\n</episode>";
-        expect(parseEpisode(makeResult(text), { task: "t", agent: "a" }).raw).toBe(text);
+        expect(parseEpisode(makeResult(text), { task: "t", agent: "a" }).output).toBe(text);
     });
 
     it("parses intermediate episode blocks with running status override", () => {
@@ -309,8 +309,8 @@ describe("parseEpisode with large output (W1C)", () => {
         const text = padding + episodeBlock;
         const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
         // raw should be truncated to roughly MAX_RAW_SIZE + marker overhead
-        expect(ep.raw.length).toBeLessThan(MAX_RAW_SIZE + 200);
-        expect(ep.raw).toContain("[truncated:");
+        expect(ep.output.length).toBeLessThan(MAX_RAW_SIZE + 200);
+        expect(ep.output).toContain("[truncated:");
     });
 
     it("still parses episode fields from large text", () => {
@@ -328,8 +328,8 @@ describe("parseEpisode with large output (W1C)", () => {
     it("does not truncate small output", () => {
         const text = "short\n<episode>\nstatus: success\nsummary: ok\nfindings:\nartifacts:\nblockers:\n</episode>";
         const ep = parseEpisode(makeResult(text), { task: "t", agent: "a" });
-        expect(ep.raw).toBe(text);
-        expect(ep.raw).not.toContain("[truncated:");
+        expect(ep.output).toBe(text);
+        expect(ep.output).not.toContain("[truncated:");
     });
 });
 

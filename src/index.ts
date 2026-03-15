@@ -92,7 +92,7 @@ export default function spindle(pi: ExtensionAPI) {
     let cwd = process.cwd();
     let subModel: string | undefined;
 
-    const cumulativeUsage = { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 };
+    const cumulativeUsage = { totalCost: 0, totalEpisodes: 0 };
 
     // Per-exec state — threaded through closures to dispatch/thread calls
     let currentOnUpdate: AgentToolUpdateCallback<SpindleExecDetails> | undefined;
@@ -114,16 +114,47 @@ export default function spindle(pi: ExtensionAPI) {
                 timeout?: number; spindle?: boolean;
                 maxOutput?: number | false;
             }) => {
-                const result = await spawnSubAgent(prompt, {
-                    agent: opts?.agent, model: opts?.model ?? subModel,
+                // llm() is sugar for a single-thread dispatch — same observability
+                const spec = createThreadSpec(prompt, {
+                    agent: opts?.agent, model: opts?.model,
                     tools: opts?.tools, timeout: opts?.timeout,
                     spindle: opts?.spindle,
                     defaultCwd: cwd, defaultModel: subModel,
                 }, currentSignal);
-                cumulativeUsage.totalCost += result.usage.cost;
-                cumulativeUsage.totalLlmCalls++;
-                if (result.error) throw new Error(result.error);
-                return truncateLlmOutput(result.text, opts?.maxOutput);
+
+                const onUpdate = currentOnUpdate;
+                const code = currentCode;
+
+                const onDispatchUpdate = (threadStates: ThreadState[]) => {
+                    if (!onUpdate) return;
+                    const doneEpisodes = threadStates.filter(t => t.episode).map(t => t.episode!);
+                    onUpdate({
+                        content: [{ type: "text", text: formatDispatchUpdate(threadStates) }],
+                        details: {
+                            code,
+                            threadStates,
+                            episodes: doneEpisodes.length > 0 ? doneEpisodes : undefined,
+                            durationMs: Math.max(0, ...threadStates.filter(t => t.startTime > 0).map(t =>
+                                t.status === "done" ? t.durationMs : Date.now() - t.startTime)),
+                            error: false,
+                        },
+                    });
+                };
+
+                const episodes = await dispatchThreads(
+                    [spec], {}, onDispatchUpdate, currentSignal,
+                );
+                const ep = episodes[0];
+                cumulativeUsage.totalCost += ep.cost;
+                cumulativeUsage.totalEpisodes++;
+
+                // Apply maxOutput truncation to ep.output if specified
+                const max = opts?.maxOutput;
+                if (max !== undefined) {
+                    ep.output = truncateLlmOutput(ep.output, max);
+                }
+
+                return ep;
             },
         });
 
@@ -310,12 +341,13 @@ export default function spindle(pi: ExtensionAPI) {
             "`await load(path)` loads a file (→ string) or directory (→ Map) into a variable without entering context.",
             "`await save(path, content)` writes data out without entering context.",
             "**Guard your context window.** Prefer `load()` over `read()` — load stores data in a variable without outputting it. Use `grep`, `bash` with `awk`/`jq`/`head`/`tail` to extract what you need. Only `console.log` the specific lines or values you need to see — never dump entire files or large generated content.",
-            "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout?, spindle? })` → string.",
+            "One-shot sub-agents: `await llm(prompt, { agent?, model?, tools?, timeout?, spindle? })` → Episode.",
             "llm() output is capped at 50KB by default. Use `{ maxOutput: false }` for full output, or `{ maxOutput: N }` for a custom byte limit.",
             "llm() truncation is destructive — the returned string itself is cut. If you see `[truncated]` in the result, call llm() again with a higher maxOutput.",
             "Threads: `thread(task, opts?)` → AsyncGenerator<Episode>. `await dispatch([thread(...), ...])` → Episode[].",
             "Episodes have: status, summary, findings, artifacts, blockers, cost, duration.",
-            "Episode.raw has the agent's full text output (up to 50KB). Use `ep.raw` when you need the actual content, not just the summary.",
+            "Episode.output has the agent's full text output (up to 50KB). Use `ep.output` when you need the actual content, not just the summary.",
+            "Episode.output has the agent's full text output (up to 50KB). Use `ep.output` when you need the actual content, not just the summary.",
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
             "Recursive Spindle: pass `{ spindle: true }` to `thread()` or `llm()` to give the sub-agent its own Spindle REPL — it can dispatch its own threads.",
             "Thread communication: `dispatch([...], { communicate: true })` lets threads send/recv/broadcast to each other by rank during execution.",
@@ -457,7 +489,7 @@ export default function spindle(pi: ExtensionAPI) {
             return {
                 content: [{ type: "text", text: [
                     "Spindle Status", "", "Variables:", varSummary, "",
-                    `Usage: ${cumulativeUsage.totalLlmCalls} LLM calls, ${cumulativeUsage.totalEpisodes} episodes, $${cumulativeUsage.totalCost.toFixed(4)}`,
+                    `Usage: ${cumulativeUsage.totalEpisodes} episodes, $${cumulativeUsage.totalCost.toFixed(4)}`,
                     `Config: sub-model=${subModel || "(default)"}, output-limit=8192`,
                 ].join("\n") }],
                 details,

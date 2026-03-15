@@ -10,7 +10,7 @@ export interface Episode {
     blockers: string[];
     warnings?: string[];
     toolCalls: number;
-    raw: string;
+    output: string;
     task: string;
     agent: string;
     model: string;
@@ -69,7 +69,7 @@ blockers:
 
 const COLLAPSED_ITEM_COUNT = 10;
 
-/** Maximum size for episode.raw (50KB). */
+/** Maximum size for episode.output (50KB). */
 export const MAX_RAW_SIZE = 50 * 1024;
 
 /** Threshold for aggregate output warning in dispatch (100MB). */
@@ -580,7 +580,7 @@ export function parseEpisodeBlock(
         artifacts: parseList(block, "artifacts"),
         blockers: parseList(block, "blockers"),
         toolCalls: 0,
-        raw: block,
+        output: block,
         task: meta.task,
         agent: meta.agent,
         model: meta.model,
@@ -590,17 +590,17 @@ export function parseEpisodeBlock(
 }
 
 export function parseEpisode(result: SubAgentResult, meta: { task: string; agent: string }): Episode {
-    const raw = result.text;
+    const rawText = result.text;
     // Grab the LAST episode block — agents may quote the template when reading our source
-    const allMatches = [...raw.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
+    const allMatches = [...rawText.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
     const match = allMatches.length > 0 ? allMatches[allMatches.length - 1] : null;
 
-    // Truncate raw AFTER parsing (parsing needs full text to find the episode block)
-    const truncatedRaw = truncateRaw(raw);
+    // Truncate output AFTER parsing (parsing needs full text to find the episode block)
+    const truncatedOutput = truncateRaw(rawText);
 
     const base = {
         toolCalls: countToolCalls(result),
-        raw: truncatedRaw,
+        output: truncatedOutput,
         task: meta.task,
         agent: meta.agent,
         model: result.model || "unknown",
@@ -612,7 +612,7 @@ export function parseEpisode(result: SubAgentResult, meta: { task: string; agent
         return {
             ...base,
             status: result.exitCode === 0 ? "success" : "failure",
-            summary: raw.slice(0, 500) || "(no output)",
+            summary: rawText.slice(0, 500) || "(no output)",
             findings: [], artifacts: [], blockers: [],
         };
     }
