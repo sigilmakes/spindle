@@ -4,7 +4,102 @@ import {
     createReadTool, createBashTool, createEditTool, createWriteTool,
     createGrepTool, createFindTool, createLsTool,
 } from "@mariozechner/pi-coding-agent";
+import type { EditOperations } from "@mariozechner/pi-coding-agent";
 const DEFAULT_MAX_LOAD_SIZE = 10 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// FileConflictError — thrown when a file's mtime doesn't match expectations
+// ---------------------------------------------------------------------------
+
+export class FileConflictError extends Error {
+    readonly path: string;
+    readonly expectedMtime: number;
+    readonly actualMtime: number;
+
+    constructor(filePath: string, expectedMtime: number, actualMtime: number) {
+        super(
+            `File modified since read: ${filePath} (expected mtime ${expectedMtime}, actual ${actualMtime}). ` +
+            `Another process may have edited this file concurrently.`,
+        );
+        this.name = "FileConflictError";
+        this.path = filePath;
+        this.expectedMtime = expectedMtime;
+        this.actualMtime = actualMtime;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// guardedWrite — write with optional mtime pre-check
+// ---------------------------------------------------------------------------
+
+export function guardedWrite(
+    filePath: string,
+    content: string,
+    expectedMtimeMs?: number,
+): void {
+    if (expectedMtimeMs !== undefined) {
+        try {
+            const stat = fs.statSync(filePath);
+            if (stat.mtimeMs !== expectedMtimeMs) {
+                throw new FileConflictError(filePath, expectedMtimeMs, stat.mtimeMs);
+            }
+        } catch (err) {
+            if (err instanceof FileConflictError) throw err;
+            // File doesn't exist yet — that's fine, skip the guard
+        }
+    }
+    fs.writeFileSync(filePath, content, "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// Mtime-tracking EditOperations wrapper
+// ---------------------------------------------------------------------------
+
+/** Module-scoped mtime map shared across all guarded edit tool instances */
+const mtimeMap = new Map<string, number>();
+
+/** Expose the mtime map for testing */
+export function getMtimeMap(): Map<string, number> {
+    return mtimeMap;
+}
+
+export function createMtimeGuardedEditOperations(): EditOperations {
+    return {
+        readFile: async (absolutePath: string): Promise<Buffer> => {
+            const buffer = await fs.promises.readFile(absolutePath);
+            const stat = await fs.promises.stat(absolutePath);
+            mtimeMap.set(absolutePath, stat.mtimeMs);
+            return buffer;
+        },
+
+        writeFile: async (absolutePath: string, content: string): Promise<void> => {
+            const expectedMtime = mtimeMap.get(absolutePath);
+            if (expectedMtime !== undefined) {
+                try {
+                    const stat = await fs.promises.stat(absolutePath);
+                    if (stat.mtimeMs !== expectedMtime) {
+                        throw new FileConflictError(absolutePath, expectedMtime, stat.mtimeMs);
+                    }
+                } catch (err) {
+                    if (err instanceof FileConflictError) throw err;
+                    // File doesn't exist — no conflict possible
+                }
+            }
+            await fs.promises.writeFile(absolutePath, content, "utf-8");
+            // Update stashed mtime after successful write
+            try {
+                const newStat = await fs.promises.stat(absolutePath);
+                mtimeMap.set(absolutePath, newStat.mtimeMs);
+            } catch {
+                mtimeMap.delete(absolutePath);
+            }
+        },
+
+        access: async (absolutePath: string): Promise<void> => {
+            await fs.promises.access(absolutePath, fs.constants.R_OK | fs.constants.W_OK);
+        },
+    };
+}
 
 const SKIP_DIRS = new Set([
     "node_modules", ".git", "dist", "build", "coverage",
@@ -24,7 +119,7 @@ export function createToolWrappers(cwd: string): ToolWrappers {
     const tools: Record<string, any> = {
         read: createReadTool(cwd),
         bash: createBashTool(cwd),
-        edit: createEditTool(cwd),
+        edit: createEditTool(cwd, { operations: createMtimeGuardedEditOperations() }),
         write: createWriteTool(cwd),
         grep: createGrepTool(cwd),
         find: createFindTool(cwd),
@@ -43,7 +138,7 @@ export function createToolWrappers(cwd: string): ToolWrappers {
 
 export interface LoadResult {
     content: string | Map<string, string>;
-    metadata: { type: "file" | "directory"; totalSize: number; fileCount: number };
+    metadata: { type: "file" | "directory"; totalSize: number; fileCount: number; mtimeMs?: number };
 }
 
 export async function load(
@@ -62,7 +157,7 @@ export async function load(
         }
         return {
             content: fs.readFileSync(resolved, "utf-8"),
-            metadata: { type: "file", totalSize: stat.size, fileCount: 1 },
+            metadata: { type: "file", totalSize: stat.size, fileCount: 1, mtimeMs: stat.mtimeMs },
         };
     }
 
@@ -96,10 +191,10 @@ export async function load(
     throw new Error(`Not a file or directory: ${resolved}`);
 }
 
-export async function save(targetPath: string, content: string, cwd: string): Promise<void> {
+export async function save(targetPath: string, content: string, cwd: string, expectedMtimeMs?: number): Promise<void> {
     const resolved = path.resolve(cwd, targetPath);
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
-    fs.writeFileSync(resolved, content, "utf-8");
+    guardedWrite(resolved, content, expectedMtimeMs);
 }
 
 export function createFileIO(cwd: string) {
