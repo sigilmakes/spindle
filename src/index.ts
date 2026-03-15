@@ -261,6 +261,7 @@ export default function spindle(pi: ExtensionAPI) {
             "Sub-agents are full pi processes with ALL tools (mcp, extensions).",
             "Recursive Spindle: pass `{ spindle: true }` to `thread()` or `llm()` to give the sub-agent its own Spindle REPL — it can dispatch its own threads.",
             "Thread communication: `dispatch([...], { communicate: true })` lets threads send/recv/broadcast to each other by rank during execution.",
+            "When dispatching threads, ensure each thread targets different files. Concurrent edits to the same file are detected (FileConflictError) and may cause thread failures.",
             "`await sleep(ms)` for delays.",
             "REPL output truncated to 8192 chars. Store results in variables, console.log what you need.",
             "Execute scripts from files: `spindle_exec({ file: \"path/to/script.js\" })` — runs a .js/.mjs file in the same REPL context with all the same builtins.",
