@@ -142,33 +142,29 @@ function checkPromptSize(code) {
     return issues;
 }
 
+function extractCallBody(code, startIndex) {
+    let depth = 0;
+    for (let i = startIndex; i < code.length; i++) {
+        if (code[i] === "(") depth++;
+        if (code[i] === ")") { depth--; if (depth === 0) return code.slice(startIndex, i + 1); }
+    }
+    return code.slice(startIndex);
+}
+
 function checkMissingNames(code) {
     const issues = [];
 
-    // thread() calls without name:
-    const threadPattern = /thread\s*\([^)]*\)/gs;
+    const callPattern = /(?:thread|llm)\s*\(/g;
     let match;
-    while ((match = threadPattern.exec(code)) !== null) {
-        if (!match[0].includes("name:") && !match[0].includes("name :")) {
+    while ((match = callPattern.exec(code)) !== null) {
+        const fnName = match[0].replace(/\s*\($/, "");
+        const body = extractCallBody(code, match.index + fnName.length);
+        if (!body.includes("name:") && !body.includes("name :")) {
             const lineNum = code.slice(0, match.index).split("\n").length;
             issues.push({
                 level: "warning",
                 line: lineNum,
-                msg: "thread() without { name: ... }",
-                hint: "Names flow through to episode data and make reports readable.",
-            });
-        }
-    }
-
-    // llm() calls without name:
-    const llmPattern = /llm\s*\([^)]*\)/gs;
-    while ((match = llmPattern.exec(code)) !== null) {
-        if (!match[0].includes("name:") && !match[0].includes("name :")) {
-            const lineNum = code.slice(0, match.index).split("\n").length;
-            issues.push({
-                level: "warning",
-                line: lineNum,
-                msg: "llm() without { name: ... }",
+                msg: `${fnName}() without { name: ... }`,
                 hint: "Names flow through to episode data and make reports readable.",
             });
         }
@@ -185,9 +181,20 @@ function checkErrorGates(code) {
         const line = lines[i].trim();
         // Pattern: ep = await llm(...) or result = await llm(...)
         if (/=\s*await\s+llm\s*\(/.test(line)) {
-            // Check next few non-empty lines for status check
+            // Find the end of this call (matching parens), then look for a status check
+            // within the next 5 non-empty lines AFTER the call ends
+            let callEndLine = i;
+            let depth = 0;
+            for (let j = i; j < lines.length; j++) {
+                for (const ch of lines[j]) {
+                    if (ch === "(") depth++;
+                    if (ch === ")") depth--;
+                }
+                if (depth <= 0) { callEndLine = j; break; }
+            }
+
             let hasGate = false;
-            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+            for (let j = callEndLine + 1; j < Math.min(callEndLine + 6, lines.length); j++) {
                 if (/\.status/.test(lines[j])) { hasGate = true; break; }
                 if (/if\s*\(/.test(lines[j]) && /status|success|fail/.test(lines[j])) { hasGate = true; break; }
             }
