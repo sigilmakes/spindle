@@ -7,15 +7,15 @@ Based on ideas from [Recursive Language Models](https://arxiv.org/abs/2512.24601
 ## Install
 
 ```bash
-# Install as a pi package (extension + skills + CLI auto-discovered)
-pi install /path/to/spindle
+# Install the CLI globally
+npm install -g /path/to/spindle
 
-# Link the CLI globally
-npm link    # from the spindle directory
+# Register the extension + skills with pi
+pi install /path/to/spindle
 ```
 
 This gives you:
-- **`spindle` CLI** — run, lint, and scaffold script plans from the terminal
+- **`spindle` CLI** — `spindle run`, `spindle lint`, `spindle new` from the terminal
 - **REPL tools** — `spindle_exec` and `spindle_status` inside pi sessions
 - **Skills** — `repl`, `script-plan`, `script-cycle` loaded automatically
 
