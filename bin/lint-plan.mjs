@@ -159,11 +159,6 @@ function checkMissingNames(code) {
     while ((match = callPattern.exec(code)) !== null) {
         const fnName = match[0].replace(/\s*\($/, "");
         const body = extractCallBody(code, match.index + fnName.length);
-        // Skip calls inside helper functions (retryLlm, loops) — name may be passed dynamically
-        const lineNum = code.slice(0, match.index).split("\n").length;
-        const surroundingLines = code.split("\n").slice(Math.max(0, lineNum - 10), lineNum);
-        const insideHelper = surroundingLines.some(l => /^(async\s+)?function\s|=>\s*\{|for\s*\(|while\s*\(/.test(l.trim()));
-        if (insideHelper) continue;
         if (!body.includes("name:") && !body.includes("name :")) {
             const lineNum = code.slice(0, match.index).split("\n").length;
             issues.push({
@@ -184,54 +179,48 @@ function checkErrorGates(code) {
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        // Pattern: ep = await llm(...) or result = await llm(...)
-        if (/=\s*await\s+llm\s*\(/.test(line)) {
-            // Find the end of this call (matching parens), then look for a status check
-            // within the next 5 non-empty lines AFTER the call ends
-            let callEndLine = i;
-            let depth = 0;
-            for (let j = i; j < lines.length; j++) {
-                for (const ch of lines[j]) {
-                    if (ch === "(") depth++;
-                    if (ch === ")") depth--;
-                }
-                if (depth <= 0) { callEndLine = j; break; }
-            }
+        // Pattern: VAR = await llm(...)
+        const assignMatch = line.match(/^(\w+)\s*=\s*await\s+llm\s*\(/);
+        if (!assignMatch) continue;
 
-            let hasGate = false;
-            for (let j = callEndLine + 1; j < Math.min(callEndLine + 6, lines.length); j++) {
-                if (/\.status/.test(lines[j])) { hasGate = true; break; }
-                if (/if\s*\(/.test(lines[j]) && /status|success|fail/.test(lines[j])) { hasGate = true; break; }
-                // gate() helper pattern — common in spindle scripts
-                if (/gate\s*\(/.test(lines[j])) { hasGate = true; break; }
-            }
+        const varName = assignMatch[1];
 
-            // Also skip if the llm() call is inside a helper that manages its own gating
-            // (e.g. retryLlm, or a for/while retry loop)
-            if (!hasGate) {
-                // Check if this llm() is inside a function body
-                let insideHelper = false;
-                for (let j = i - 1; j >= Math.max(0, i - 15); j--) {
-                    const ctx = lines[j].trim();
-                    // Inside a retry helper, for loop, or while loop
-                    if (/^(async\s+)?function\s|=>\s*\{|for\s*\(|while\s*\(/.test(ctx)) {
-                        insideHelper = true;
-                        break;
-                    }
-                    // Hit a top-level phase marker — not inside a helper
-                    if (/^\/\/\s*===/.test(ctx)) break;
-                }
-                if (insideHelper) hasGate = true;
+        // Find the end of this call (matching parens)
+        let callEndLine = i;
+        let depth = 0;
+        for (let j = i; j < lines.length; j++) {
+            for (const ch of lines[j]) {
+                if (ch === "(") depth++;
+                if (ch === ")") depth--;
             }
+            if (depth <= 0) { callEndLine = j; break; }
+        }
 
-            if (!hasGate) {
-                issues.push({
-                    level: "warning",
-                    line: i + 1,
-                    msg: "llm() result not checked for failure",
-                    hint: "Gate on ep.status: if (ep.status !== 'success') return",
-                });
-            }
+        // Scan forward from call end until next `await llm(`, `await dispatch(`, or EOF.
+        // Look for evidence that varName's status was checked.
+        let hasGate = false;
+        for (let j = callEndLine + 1; j < lines.length; j++) {
+            const fwd = lines[j];
+
+            // Hit the next llm/dispatch call — stop scanning
+            if (/await\s+(llm|dispatch)\s*\(/.test(fwd)) break;
+
+            // Direct status check: varName.status
+            if (fwd.includes(varName + ".status")) { hasGate = true; break; }
+
+            // Variable passed to any function call: fn(varName, ...)
+            // Covers: if (!gate(ep, ...)), gate(ep, ...), check(ep), verify(ep.status), etc.
+            const varInCall = new RegExp("\\b\\w+\\s*\\([^)]*\\b" + varName + "\\b");
+            if (varInCall.test(fwd)) { hasGate = true; break; }
+        }
+
+        if (!hasGate) {
+            issues.push({
+                level: "warning",
+                line: i + 1,
+                msg: "llm() result not checked for failure",
+                hint: "Gate on " + varName + ".status or pass " + varName + " to a check function",
+            });
         }
     }
 
