@@ -1,6 +1,6 @@
 # Advanced Spindle
 
-Read this when you need thread communication, file locking details, output limit handling, or recursive sub-agents.
+Thread communication, file locking, output limits, and recursive sub-agents.
 
 ## Thread Communication
 
@@ -8,8 +8,8 @@ Threads in a `dispatch()` can exchange messages when `{ communicate: true }` is 
 
 ```javascript
 results = await dispatch([
-    thread("define types, then broadcast to team", { spindle: true }),
-    thread("wait for types from rank 0, then implement", { spindle: true }),
+    thread("Define types, then broadcast to team", { spindle: true }),
+    thread("Wait for types from rank 0, then implement", { spindle: true }),
 ], { communicate: true })
 ```
 
@@ -41,28 +41,36 @@ Use distinct names for multiple sync points. All threads must call the same barr
 
 **Rule:** Dispatch threads should target non-overlapping files. Use barriers to sequence access to shared files when overlap is unavoidable.
 
+## File Collision Detection
+
+When multiple dispatch threads write the same file, Spindle detects the collision and adds a warning to the affected threads. This is advisory — it doesn't prevent the write, but surfaces the conflict in `episode.warnings` so you can handle it.
+
+```javascript
+results = await dispatch([...])
+collisions = results.filter(ep => ep.warnings?.length)
+collisions.forEach(ep => console.log(`${ep.name}: ${ep.warnings.join(", ")}`))
+```
+
 ## Output Limits
 
 | What | Limit | Behavior |
 |------|-------|----------|
+| REPL console output | 8192 chars | Truncated — store in variables instead |
 | `episode.output` | 50KB | Head+tail preserved, middle truncated |
 | `llm()` return | 50KB default | Set `maxOutput: false` to disable |
 | Dispatch aggregate | 100MB warning | Logged but not enforced |
-| REPL console output | 8192 chars | Truncated; store in variables instead |
 
-Truncation is destructive — the string is cut. If you see `[truncated]`, either extract what you need via the sub-agent's structured fields (`summary`, `findings`) or re-run with `{ maxOutput: false }`.
+Truncation is destructive. If you see `[truncated]`, either use the structured fields (`summary`, `findings`) or re-run with `{ maxOutput: false }`.
 
 ## Recursive Spindle
 
-Pass `{ spindle: true }` to give a sub-agent its own Spindle REPL. It can call `load()`, `dispatch()`, run scripts — the full API. Useful for complex tasks that benefit from their own orchestration layer.
+Pass `{ spindle: true }` to give a sub-agent its own Spindle REPL. It can call `load()`, `dispatch()`, run scripts — the full API.
 
 ```javascript
 results = await dispatch([
-    thread("refactor auth module", { spindle: true }),
-    thread("refactor API layer", { spindle: true }),
+    thread("Refactor auth module", { spindle: true }),
+    thread("Refactor API layer", { spindle: true }),
 ])
 ```
 
-## File Collision Detection
-
-When multiple dispatch threads write to the same file, Spindle detects the collision and adds a warning to the affected episodes' `warnings` field. This is advisory — it doesn't prevent the write, but surfaces the conflict so the orchestrator can handle it.
+Use this for complex tasks where the sub-agent benefits from its own orchestration layer — loading files into variables, running multiple analysis passes, or spawning its own sub-agents.

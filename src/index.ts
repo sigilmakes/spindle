@@ -64,8 +64,8 @@ const srcDir = __dirname.endsWith("/dist") || __dirname.endsWith("\\dist")
 setExtensionDir(srcDir);
 
 export default function spindle(pi: ExtensionAPI) {
-    // Skill file lives at ~/.pi/agent/skills/spindle/SKILL.md (standard location).
-    // No resources_discover registration needed — pi finds it automatically.
+    // Skills are bundled in the package (skills/repl/SKILL.md) and discovered
+    // automatically via the "pi" manifest in package.json.
     const extensionDir = path.dirname(fileURLToPath(import.meta.url));
 
     /** Names of all injected builtins — used by vars()/clear() to exclude from user variables. */
@@ -371,7 +371,13 @@ export default function spindle(pi: ExtensionAPI) {
             [
                 "Use spindle_exec for ALL operations. Do not call read, edit, write, bash, grep, find, ls directly.",
                 "",
-                "IMPORTANT: When dispatching sub-agents, ALWAYS build tasks programmatically:",
+                "IMPORTANT: Think in JavaScript, not bash. Use grep/find/load builtins to get data, then JS to transform it.",
+                "  ✗ bash({command: \"find src -name '*.ts' | xargs grep 'export' | awk ...\"})  ← shell for data extraction",
+                "  ✓ hits = await grep({pattern: 'export class', path: 'src/'})                  ← builtin + JS filtering",
+                "  ✓ src = await load('src/'); [...src.entries()].filter(...)                     ← load + transform",
+                "bash() is for builds, tests, git — tools that DO things. Not for searching or data extraction.",
+                "",
+                "When dispatching sub-agents, ALWAYS build tasks programmatically:",
                 "  files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))",
                 "  tasks = files.map(f => thread(`Review ${f}`, { name: f, agent: 'scout' }))",
                 "  results = await dispatch(tasks)",
@@ -379,8 +385,10 @@ export default function spindle(pi: ExtensionAPI) {
                 "",
                 "Bare assignment persists across calls. const/let are scoped to one call.",
                 "",
-                "API: read({path}), edit({path,oldText,newText}), write({path,content}), bash({command}), grep({pattern,path}), find({pattern,path}), ls({path})",
+                "Search: grep({pattern,path}), find({pattern,path}), ls({path})",
+                "Files: read({path}), edit({path,oldText,newText}), write({path,content})",
                 "I/O: load(path) → string|Map, save(path, content)",
+                "Shell: bash({command}) — for builds/tests/git only",
                 "Agents: llm(prompt, opts?) → Episode, thread(task, opts?), dispatch(specs) → Episode[]",
                 "Episode: { name, status, summary, findings[], artifacts[], blockers[], output, cost }",
                 "Utils: sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(name?), help()",
