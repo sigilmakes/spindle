@@ -59,7 +59,7 @@ async function run(file, flags) {
     // Build the pi command — interactive mode with the script as initial prompt
     const extensionPath = path.join(ROOT, "src", "index.ts");
     const cwd = path.dirname(resolved);
-    const prompt = `Run this script plan: spindle_exec({ file: ${JSON.stringify(resolved)} })`;
+    const prompt = `Execute this spindle script immediately. Do not read skill files or do orientation — just run it:\n\nspindle_exec({ file: ${JSON.stringify(resolved)} })`;
 
     const piArgs = [
         "--extension", extensionPath,
