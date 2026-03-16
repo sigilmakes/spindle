@@ -238,7 +238,10 @@ export async function spawnSubAgent(
 
     // Recursive Spindle: give the sub-agent its own Spindle REPL
     if (options.spindle && extensionDir) {
-        const extPath = path.join(extensionDir, "index.ts");
+        // Prefer compiled .js (fast) over .ts (jiti compile on every spawn)
+        const extPathJs = path.join(extensionDir, "index.js");
+        const extPathTs = path.join(extensionDir, "index.ts");
+        const extPath = fs.existsSync(extPathJs) ? extPathJs : extPathTs;
         if (fs.existsSync(extPath)) {
             args.push("--extension", extPath);
         }

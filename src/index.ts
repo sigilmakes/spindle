@@ -56,12 +56,10 @@ export function truncateLlmOutput(
 // pointing back at this extension's source entry point.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// If running from dist/, resolve to the source src/ directory.
-// If already in src/ (jiti), use as-is.
-const srcDir = __dirname.endsWith("/dist") || __dirname.endsWith("\\dist")
-    ? path.join(path.dirname(__dirname), "src")
-    : __dirname;
-setExtensionDir(srcDir);
+// Use whatever directory we're running from — dist/ or src/.
+// If running from dist/, sub-agents load dist/index.js (pre-compiled, fast).
+// If running from src/ via jiti, sub-agents load src/index.ts (compiled on the fly).
+setExtensionDir(__dirname);
 
 export default function spindle(pi: ExtensionAPI) {
     // Skills are bundled in the package (skills/repl/SKILL.md) and discovered
