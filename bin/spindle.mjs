@@ -101,7 +101,6 @@ async function scaffold(name) {
 
     const slug = name.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
     const jsFile = `${slug}.spindle.js`;
-    const mdFile = `${slug}.md`;
 
     if (fs.existsSync(jsFile)) {
         console.error(COLORS.red(`Already exists: ${jsFile}`));
@@ -109,7 +108,6 @@ async function scaffold(name) {
     }
 
     const jsContent = `// plan: ${slug}
-// See ${mdFile} for design rationale
 
 // === Context ===
 CONTEXT = "TODO: describe the goal and constraints"
@@ -152,41 +150,14 @@ totalCost = results.reduce((s, r) => s + r.cost, 0) + (ep?.cost || 0)
 console.log("Total cost: $" + totalCost.toFixed(2))
 `;
 
-    const mdContent = `# Plan: ${name}
-
-## Problem
-
-TODO: What's wrong and why it matters.
-
-## Approach
-
-TODO: What you're doing and why this approach.
-
-## Decisions
-
-TODO: What you chose, what you rejected, and why.
-
-## Constraints
-
-TODO: What can't change. External dependencies. Compatibility requirements.
-
-## Verification
-
-TODO: How to know the work is done. What tests to run. What to check.
-`;
-
     fs.writeFileSync(jsFile, jsContent, "utf-8");
-    fs.writeFileSync(mdFile, mdContent, "utf-8");
 
-    console.log(COLORS.green("✓") + " Created:");
-    console.log(`  ${COLORS.cyan(jsFile)}  ${COLORS.dim("← executable plan")}`);
-    console.log(`  ${COLORS.cyan(mdFile)}  ${COLORS.dim("← design context")}`);
+    console.log(COLORS.green("✓") + ` Created ${COLORS.cyan(jsFile)}`);
     console.log("");
     console.log("Next steps:");
-    console.log(`  1. Edit ${COLORS.bold(mdFile)} with your design rationale`);
-    console.log(`  2. Edit ${COLORS.bold(jsFile)} with your phases and tasks`);
-    console.log(`  3. ${COLORS.dim("spindle lint " + jsFile)}`);
-    console.log(`  4. ${COLORS.dim("spindle run " + jsFile)}`);
+    console.log(`  1. Edit ${COLORS.bold(jsFile)} — fill in the TODOs`);
+    console.log(`  2. ${COLORS.dim("spindle lint " + jsFile)}`);
+    console.log(`  3. ${COLORS.dim("spindle run " + jsFile)}`);
 }
 
 function help() {
