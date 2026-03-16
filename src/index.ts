@@ -80,14 +80,14 @@ export default function spindle(pi: ExtensionAPI) {
         // orchestration
         "llm", "thread", "dispatch",
         // utilities
-        "sleep", "diff", "retry", "vars", "clear",
+        "sleep", "diff", "retry", "vars", "clear", "help",
     ]);
 
     let repl: Repl | null = null;
     let cwd = process.cwd();
     let subModel: string | undefined;
 
-    const cumulativeUsage = { totalCost: 0, totalEpisodes: 0 };
+    const cumulativeUsage = { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 };
 
     // Per-exec state — threaded through closures to dispatch/thread calls
     let currentOnUpdate: AgentToolUpdateCallback<SpindleExecDetails> | undefined;
@@ -105,13 +105,13 @@ export default function spindle(pi: ExtensionAPI) {
 
         r.inject({
             llm: async (prompt: string, opts?: {
-                agent?: string; model?: string; tools?: string[];
+                name?: string; agent?: string; model?: string; tools?: string[];
                 timeout?: number; spindle?: boolean;
                 maxOutput?: number | false;
             }) => {
                 // llm() is sugar for a single-thread dispatch — same observability
                 const spec = createThreadSpec(prompt, {
-                    agent: opts?.agent, model: opts?.model,
+                    name: opts?.name, agent: opts?.agent, model: opts?.model,
                     tools: opts?.tools, timeout: opts?.timeout,
                     spindle: opts?.spindle,
                     defaultCwd: cwd, defaultModel: subModel,
@@ -142,6 +142,7 @@ export default function spindle(pi: ExtensionAPI) {
                 const ep = episodes[0];
                 cumulativeUsage.totalCost += ep.cost;
                 cumulativeUsage.totalEpisodes++;
+                cumulativeUsage.totalLlmCalls++;
 
                 // Apply maxOutput truncation to ep.output if specified
                 const max = opts?.maxOutput;
@@ -187,8 +188,9 @@ export default function spindle(pi: ExtensionAPI) {
                 for (const ep of episodes) {
                     cumulativeUsage.totalCost += ep.cost;
                     cumulativeUsage.totalEpisodes++;
+                    cumulativeUsage.totalLlmCalls++;
                 }
-                (repl as any).__lastEpisodes = episodes;
+                repl!.lastEpisodes = episodes;
                 return episodes;
             },
         });
@@ -202,6 +204,44 @@ export default function spindle(pi: ExtensionAPI) {
 
         const ctxTools = createContextTools(r, BUILTIN_NAMES);
         r.inject({ vars: ctxTools.vars, clear: ctxTools.clear });
+
+        // --- help() — discoverability without the skill doc ---
+        r.inject({
+            help: () => [
+                "=== Spindle REPL ===",
+                "",
+                "Tools (return ToolResult { output, error, ok, exitCode }):",
+                "  read({ path })              Read a file",
+                "  edit({ path, oldText, newText })  Replace exact text in a file",
+                "  write({ path, content })    Create or overwrite a file",
+                "  bash({ command, timeout? }) Run a shell command",
+                "  grep({ pattern, path })     Search with ripgrep",
+                "  find({ pattern, path })     Find files by glob",
+                "  ls({ path })                List directory contents",
+                "",
+                "File I/O (bypasses context window):",
+                "  load(path)                  File → string, directory → Map<path, content>",
+                "  save(path, content)         Write without entering context",
+                "",
+                "Sub-agents:",
+                "  llm(prompt, opts?)          One-shot sub-agent → Episode",
+                "  thread(task, opts?)         Create a ThreadSpec for dispatch",
+                "  dispatch(specs, opts?)      Run threads in parallel → Episode[]",
+                "",
+                "  opts: { name, agent, model, tools, timeout, spindle, stepped, maxOutput }",
+                "  Episode: { name, status, summary, findings, artifacts, blockers, output, cost }",
+                "",
+                "Utilities:",
+                "  sleep(ms)                   Async delay",
+                "  diff(a, b, opts?)           Unified diff (files or strings)",
+                "  retry(fn, opts?)            Exponential backoff (attempts, delay, backoff)",
+                "  vars()                      List persistent REPL variables",
+                "  clear(name?)                Free a variable",
+                "  help()                      This message",
+                "",
+                "Scoping: bare assignment (x = ...) persists. const/let are scoped to one call.",
+            ].join("\n"),
+        });
 
         return r;
     }
@@ -328,7 +368,23 @@ export default function spindle(pi: ExtensionAPI) {
             file: Type.Optional(Type.String({ description: "Path to a .js or .mjs file to execute (alternative to code)" })),
         }),
         promptGuidelines: [
-            "Read the /repl skill for full API reference. Use spindle_exec for all operations — do not call native tools directly.",
+            [
+                "Use spindle_exec for ALL operations. Do not call read, edit, write, bash, grep, find, ls directly.",
+                "",
+                "IMPORTANT: When dispatching sub-agents, ALWAYS build tasks programmatically:",
+                "  files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))",
+                "  tasks = files.map(f => thread(`Review ${f}`, { name: f, agent: 'scout' }))",
+                "  results = await dispatch(tasks)",
+                "Never hand-write similar thread() calls. Use .map() over data. Pass file paths in prompts, not file contents.",
+                "",
+                "Bare assignment persists across calls. const/let are scoped to one call.",
+                "",
+                "API: read({path}), edit({path,oldText,newText}), write({path,content}), bash({command}), grep({pattern,path}), find({pattern,path}), ls({path})",
+                "I/O: load(path) → string|Map, save(path, content)",
+                "Agents: llm(prompt, opts?) → Episode, thread(task, opts?), dispatch(specs) → Episode[]",
+                "Episode: { name, status, summary, findings[], artifacts[], blockers[], output, cost }",
+                "Utils: sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(name?), help()",
+            ].join("\n"),
         ],
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -379,7 +435,7 @@ export default function spindle(pi: ExtensionAPI) {
                 code = params.code!;
             }
 
-            (repl as any).__lastEpisodes = undefined;
+            repl.lastEpisodes = [];
             currentOnUpdate = onUpdate;
             currentSignal = signal;
             currentCode = code;
@@ -389,7 +445,7 @@ export default function spindle(pi: ExtensionAPI) {
 
             try {
                 const result = await repl.exec(code, signal);
-                const episodes: Episode[] = (repl as any).__lastEpisodes || [];
+                const episodes = repl.lastEpisodes as Episode[];
 
                 const parts: string[] = [];
                 if (result.output) parts.push(result.output);
@@ -459,7 +515,7 @@ export default function spindle(pi: ExtensionAPI) {
             return {
                 content: [{ type: "text", text: [
                     "Spindle Status", "", "Variables:", varSummary, "",
-                    `Usage: ${cumulativeUsage.totalEpisodes} episodes, $${cumulativeUsage.totalCost.toFixed(4)}`,
+                    `Usage: ${cumulativeUsage.totalLlmCalls} sub-agents, $${cumulativeUsage.totalCost.toFixed(4)}`,
                     `Config: sub-model=${subModel || "(default)"}, output-limit=8192`,
                 ].join("\n") }],
                 details,

@@ -36,25 +36,20 @@ describe("load", () => {
         expect(r.metadata.type).toBe("directory");
     });
 
-    it("skips node_modules", async () => {
+    it("loads all files including hidden and node_modules", async () => {
         fs.mkdirSync(path.join(tmp, "d"));
         fs.writeFileSync(path.join(tmp, "d", "app.ts"), "app");
         fs.mkdirSync(path.join(tmp, "d", "node_modules"), { recursive: true });
         fs.writeFileSync(path.join(tmp, "d", "node_modules", "x.js"), "x");
+        fs.mkdirSync(path.join(tmp, "d", ".git"), { recursive: true });
+        fs.writeFileSync(path.join(tmp, "d", ".git", "config"), "c");
+        fs.writeFileSync(path.join(tmp, "d", ".hidden"), "h");
         const m = (await load("d", tmp)).content as Map<string, string>;
-        expect(m.size).toBe(1);
+        expect(m.size).toBe(4);
         expect(m.has("app.ts")).toBe(true);
-    });
-
-    it("skips .git and hidden files", async () => {
-        fs.mkdirSync(path.join(tmp, "p"));
-        fs.writeFileSync(path.join(tmp, "p", "main.ts"), "main");
-        fs.mkdirSync(path.join(tmp, "p", ".git"), { recursive: true });
-        fs.writeFileSync(path.join(tmp, "p", ".git", "config"), "c");
-        fs.writeFileSync(path.join(tmp, "p", ".hidden"), "h");
-        const m = (await load("p", tmp)).content as Map<string, string>;
-        expect(m.size).toBe(1);
-        expect(m.has("main.ts")).toBe(true);
+        expect(m.has("node_modules/x.js")).toBe(true);
+        expect(m.has(".git/config")).toBe(true);
+        expect(m.has(".hidden")).toBe(true);
     });
 
     it("loads nested directories", async () => {

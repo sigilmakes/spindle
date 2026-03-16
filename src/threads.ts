@@ -3,6 +3,7 @@ import { CommServer } from "./comm/index.js";
 import { FileCollisionTracker, extractWritePaths } from "./file-collision-tracker.js";
 
 export interface Episode {
+    name?: string;
     status: "success" | "failure" | "blocked" | "running";
     summary: string;
     findings: string[];
@@ -110,6 +111,7 @@ export type DisplayItem =
 export interface ThreadState {
     index: number;
     task: string;
+    name?: string;
     agent: string;
     status: "pending" | "running" | "done";
     /** Timestamp when the thread's sub-agent announced it was ready. 0 = not yet started. */
@@ -126,6 +128,7 @@ export interface ThreadState {
 }
 
 export interface ThreadOptions {
+    name?: string;
     agent?: string;
     model?: string;
     tools?: string[];
@@ -137,6 +140,7 @@ export interface ThreadOptions {
 export interface ThreadSpec {
     __brand: "ThreadSpec";
     task: string;
+    name?: string;
     agent: string;
     opts: ThreadOptions & { defaultCwd: string; defaultModel?: string };
     signal?: AbortSignal;
@@ -179,6 +183,7 @@ export function createThreadSpec(
     return {
         __brand: "ThreadSpec",
         task,
+        name: opts.name,
         agent: opts.agent || "anonymous",
         opts,
         signal,
@@ -213,7 +218,7 @@ function createThreadGenerator(
     opts: ThreadOptions & { defaultCwd: string; defaultModel?: string },
     signal?: AbortSignal,
 ): AsyncGenerator<Episode, void, undefined> {
-    const meta = { task, agent: opts.agent || "anonymous" };
+    const meta = { task, name: opts.name, agent: opts.agent || "anonymous" };
     const suffix = opts.stepped ? STEPPED_EPISODE_SUFFIX : EPISODE_SUFFIX;
 
     // Local AbortController for cleanup when the generator is closed early.
@@ -430,6 +435,7 @@ export async function dispatchThreads(
     const states: ThreadState[] = specs.map((spec, i) => ({
         index: i,
         task: spec.task,
+        name: spec.name,
         agent: spec.agent,
         status: "pending" as const,
         announcedAt: 0,
@@ -563,7 +569,7 @@ export async function dispatchThreads(
                 signal ?? spec.signal,
             );
 
-            const episode = parseEpisode(result, { task: spec.task, agent: spec.agent });
+            const episode = parseEpisode(result, { task: spec.task, name: spec.name, agent: spec.agent });
             // Attach any collision warnings relevant to this thread
             const threadWarnings = state.displayItems
                 .filter((item): item is DisplayItem & { type: "warning" } => item.type === "warning")
@@ -594,11 +600,12 @@ export async function dispatchThreads(
 
 export function parseEpisodeBlock(
     block: string,
-    meta: { task: string; agent: string; model: string; cost: number; duration: number },
+    meta: { task: string; name?: string; agent: string; model: string; cost: number; duration: number },
 ): Episode {
     const statusMatch = block.match(/status:\s*(success|failure|blocked|running)/i);
     const summaryMatch = block.match(/summary:\s*(.+?)(?=\nfindings:|\nartifacts:|\nblockers:|\n*$)/is);
     return {
+        name: meta.name,
         status: (statusMatch?.[1]?.toLowerCase() as Episode["status"]) || "running",
         summary: summaryMatch?.[1]?.trim() || "",
         findings: parseList(block, "findings"),
@@ -614,7 +621,7 @@ export function parseEpisodeBlock(
     };
 }
 
-export function parseEpisode(result: SubAgentResult, meta: { task: string; agent: string }): Episode {
+export function parseEpisode(result: SubAgentResult, meta: { task: string; name?: string; agent: string }): Episode {
     const rawText = result.text;
     // Grab the LAST episode block — agents may quote the template when reading our source
     const allMatches = [...rawText.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
@@ -624,6 +631,7 @@ export function parseEpisode(result: SubAgentResult, meta: { task: string; agent
     const truncatedOutput = truncateRaw(rawText);
 
     const base = {
+        name: meta.name,
         toolCalls: countToolCalls(result),
         output: truncatedOutput,
         task: meta.task,

@@ -103,11 +103,6 @@ export function createMtimeGuardedEditOperations(): EditOperations {
     };
 }
 
-const SKIP_DIRS = new Set([
-    "node_modules", ".git", "dist", "build", "coverage",
-    ".next", ".nuxt", "__pycache__", ".venv", "venv", ".tox",
-]);
-
 function extractText(result: { content: Array<{ type: string; text?: string }> }): string {
     return result.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -279,7 +274,7 @@ export async function load(
 
         function walk(dir: string, prefix: string): void {
             for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+
                 const fullPath = path.join(dir, entry.name);
                 const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
 

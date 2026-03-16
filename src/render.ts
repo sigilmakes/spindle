@@ -15,6 +15,8 @@ export interface SpindleExecDetails {
 export interface SpindleStatusDetails {
     variables: Array<{ name: string; type: string; preview: string }>;
     usage: { totalCost: number; totalEpisodes: number; totalLlmCalls: number };
+    // totalLlmCalls tracks individual sub-agent spawns (same as totalEpisodes currently,
+    // but kept separate for future batching/retry scenarios where they could diverge).
     config: { subModel: string | undefined; outputLimit: number };
 }
 
@@ -106,8 +108,8 @@ function formatThreadColumn(state: ThreadState, expanded: boolean, theme: Theme)
         : state.status === "running" ? theme.fg("warning", "○")
         : theme.fg("dim", "○");
 
-    const taskPreview = state.task.length > 40 ? state.task.slice(0, 40) + "..." : state.task;
-    let col = `${icon} ${theme.fg("accent", state.agent)}: ${theme.fg("dim", taskPreview)}`;
+    const label = state.name || (state.task.length > 40 ? state.task.slice(0, 40) + "..." : state.task);
+    let col = `${icon} ${theme.fg("accent", state.agent)}: ${theme.fg("dim", label)}`;
 
     const items = state.displayItems;
     const showCount = expanded ? items.length : COLLAPSED_ITEM_COUNT;
@@ -284,8 +286,7 @@ export function formatStatusResult(details: SpindleStatusDetails, theme: Theme):
     }
 
     text += "\n" + theme.fg("muted", "─── Usage ───") + "\n";
-    text += `  Episodes: ${details.usage.totalEpisodes}\n`;
-    text += `  LLM calls: ${details.usage.totalLlmCalls}\n`;
+    text += `  Sub-agents: ${details.usage.totalLlmCalls}\n`;
     text += `  Cost: $${details.usage.totalCost.toFixed(4)}\n`;
 
     text += "\n" + theme.fg("muted", "─── Config ───") + "\n";

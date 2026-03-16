@@ -18,6 +18,10 @@ export interface ExecResult {
 export class Repl {
     private context: vm.Context;
     private config: ReplConfig;
+    private _lastEpisodes: unknown[] = [];
+
+    get lastEpisodes(): unknown[] { return this._lastEpisodes; }
+    set lastEpisodes(eps: unknown[]) { this._lastEpisodes = eps; }
 
     constructor(config?: Partial<ReplConfig>) {
         this.config = {
@@ -105,7 +109,7 @@ export class Repl {
             "Promise", "URL", "TextEncoder", "TextDecoder",
             "read", "bash", "grep", "find", "edit", "write", "ls",
             "load", "save", "llm", "thread", "dispatch", "sleep",
-            "diff", "retry", "vars", "clear",
+            "diff", "retry", "vars", "clear", "help",
         ]);
 
         const vars: Array<{ name: string; type: string; preview: string }> = [];
@@ -124,7 +128,7 @@ export class Repl {
         const preserved = [
             "read", "bash", "grep", "find", "edit", "write", "ls",
             "load", "save", "llm", "thread", "dispatch", "sleep",
-            "diff", "retry", "vars", "clear",
+            "diff", "retry", "vars", "clear", "help",
         ];
         for (const name of preserved) {
             if (typeof old[name] === "function") {

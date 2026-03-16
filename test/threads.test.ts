@@ -71,6 +71,18 @@ blockers:
         expect(parseEpisode(makeResult(""), { task: "t", agent: "a" }).summary).toBe("(no output)");
     });
 
+    it("propagates name from meta to episode", () => {
+        const text = `<episode>\nstatus: success\nsummary: Done.\nfindings:\nartifacts:\nblockers:\n</episode>`;
+        const ep = parseEpisode(makeResult(text), { task: "t", name: "my-thread", agent: "scout" });
+        expect(ep.name).toBe("my-thread");
+    });
+
+    it("name is undefined when not provided", () => {
+        const text = `<episode>\nstatus: success\nsummary: Done.\nfindings:\nartifacts:\nblockers:\n</episode>`;
+        const ep = parseEpisode(makeResult(text), { task: "t", agent: "scout" });
+        expect(ep.name).toBeUndefined();
+    });
+
     it("counts tool calls from messages", () => {
         const result = makeResult("done", {
             messages: [{
@@ -134,6 +146,16 @@ describe("ThreadSpec", () => {
         expect(spec.agent).toBe("anonymous");
     });
 
+    it("carries name through to spec", () => {
+        const spec = createThreadSpec("task", { name: "my-thread", agent: "scout", defaultCwd: "/tmp", defaultModel: undefined });
+        expect(spec.name).toBe("my-thread");
+    });
+
+    it("name is undefined when not provided", () => {
+        const spec = createThreadSpec("task", { defaultCwd: "/tmp", defaultModel: undefined });
+        expect(spec.name).toBeUndefined();
+    });
+
     it("implements AsyncGenerator protocol", () => {
         const spec = createThreadSpec("task", { defaultCwd: "/tmp", defaultModel: undefined });
         expect(typeof spec[Symbol.asyncIterator]).toBe("function");
@@ -181,6 +203,12 @@ describe("parseEpisodeBlock", () => {
         expect(ep.cost).toBe(0.02);
         expect(ep.duration).toBe(3000);
         expect(ep.toolCalls).toBe(0);
+    });
+
+    it("propagates name from meta", () => {
+        const meta = { task: "t", name: "review-auth", agent: "scout", model: "m", cost: 0, duration: 0 };
+        const ep = parseEpisodeBlock("status: success\nsummary: Done.\nfindings:\nartifacts:\nblockers:\n", meta);
+        expect(ep.name).toBe("review-auth");
     });
 
     it("handles empty block gracefully", () => {
