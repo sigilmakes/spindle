@@ -159,6 +159,11 @@ function checkMissingNames(code) {
     while ((match = callPattern.exec(code)) !== null) {
         const fnName = match[0].replace(/\s*\($/, "");
         const body = extractCallBody(code, match.index + fnName.length);
+        // Skip calls inside helper functions (retryLlm, loops) — name may be passed dynamically
+        const lineNum = code.slice(0, match.index).split("\n").length;
+        const surroundingLines = code.split("\n").slice(Math.max(0, lineNum - 10), lineNum);
+        const insideHelper = surroundingLines.some(l => /^(async\s+)?function\s|=>\s*\{|for\s*\(|while\s*\(/.test(l.trim()));
+        if (insideHelper) continue;
         if (!body.includes("name:") && !body.includes("name :")) {
             const lineNum = code.slice(0, match.index).split("\n").length;
             issues.push({
@@ -197,7 +202,28 @@ function checkErrorGates(code) {
             for (let j = callEndLine + 1; j < Math.min(callEndLine + 6, lines.length); j++) {
                 if (/\.status/.test(lines[j])) { hasGate = true; break; }
                 if (/if\s*\(/.test(lines[j]) && /status|success|fail/.test(lines[j])) { hasGate = true; break; }
+                // gate() helper pattern — common in spindle scripts
+                if (/gate\s*\(/.test(lines[j])) { hasGate = true; break; }
             }
+
+            // Also skip if the llm() call is inside a helper that manages its own gating
+            // (e.g. retryLlm, or a for/while retry loop)
+            if (!hasGate) {
+                // Check if this llm() is inside a function body
+                let insideHelper = false;
+                for (let j = i - 1; j >= Math.max(0, i - 15); j--) {
+                    const ctx = lines[j].trim();
+                    // Inside a retry helper, for loop, or while loop
+                    if (/^(async\s+)?function\s|=>\s*\{|for\s*\(|while\s*\(/.test(ctx)) {
+                        insideHelper = true;
+                        break;
+                    }
+                    // Hit a top-level phase marker — not inside a helper
+                    if (/^\/\/\s*===/.test(ctx)) break;
+                }
+                if (insideHelper) hasGate = true;
+            }
+
             if (!hasGate) {
                 issues.push({
                     level: "warning",
