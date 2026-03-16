@@ -138,12 +138,16 @@ for await (const ep of thread("Refactor auth module", { stepped: true })) {
 
 ## CLI
 
+Spindle ships a standalone CLI. Link it globally with `npm link` from the spindle directory.
+
 ```bash
-spindle new refactor-auth            # Scaffold .spindle.js + .md pair
-spindle lint refactor-auth.spindle.js  # Check for issues before running
-spindle run refactor-auth.spindle.js   # Execute via pi (lints first)
+spindle new refactor-auth              # Scaffold a .spindle.js with phases, gates, and discovery
+spindle lint refactor-auth.spindle.js  # Catch syntax errors, missing names, oversized prompts
+spindle run refactor-auth.spindle.js   # Lint, then execute via pi
 spindle run plan.spindle.js --model claude-sonnet-4-5 --no-lint
 ```
+
+`new` generates a ready-to-edit skeleton with discovery-driven dispatch, error gates, verification, and cost tracking already wired in. `lint` validates before you spend money on sub-agents. `run` lints first by default, then delegates to pi for execution.
 
 ## Pi commands
 
