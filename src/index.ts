@@ -246,6 +246,31 @@ export default function spindle(pi: ExtensionAPI) {
         return r;
     }
 
+    // Fast-path: when the prompt is a direct script execution request (from CLI),
+    // strip the system prompt to bare minimum so the agent just calls the tool.
+    let scriptExecMode = false;
+
+    pi.on("input", async (event) => {
+        if (event.text.includes("spindle_exec({ file:") && event.text.includes("Execute this spindle script")) {
+            scriptExecMode = true;
+            // Strip to just the tool call instruction
+            const match = event.text.match(/spindle_exec\(\{[^}]+\}\)/);
+            if (match) {
+                return { action: "transform" as const, text: match[0] };
+            }
+        }
+        return { action: "continue" as const };
+    });
+
+    pi.on("before_agent_start", async (event) => {
+        if (scriptExecMode) {
+            scriptExecMode = false;
+            return {
+                systemPrompt: "You are a script runner. Call the spindle_exec tool exactly as specified. No other actions.",
+            };
+        }
+    });
+
     let commClient: CommClient | null = null;
 
     pi.on("session_start", async (_event, ctx) => {
@@ -422,9 +447,9 @@ export default function spindle(pi: ExtensionAPI) {
                 file = params.file;
                 const resolved = path.resolve(ctx.cwd, file);
 
-                if (!/\.(js|mjs)$/.test(resolved)) {
+                if (!/\.(js|mjs)$/.test(resolved) && !/\.spindle\.js$/.test(resolved)) {
                     return {
-                        content: [{ type: "text", text: "Error: File must end in .js or .mjs" }],
+                        content: [{ type: "text", text: "Error: File must end in .js, .mjs, or .spindle.js" }],
                         details: { code: "", file, error: true } satisfies SpindleExecDetails,
                         isError: true,
                     };
