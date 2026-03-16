@@ -257,7 +257,7 @@ const filePath = args.find(a => !a.startsWith("-"));
 const flags = new Set(args.filter(a => a.startsWith("-")));
 
 if (!filePath) {
-    console.log("Usage: lint-plan <file.js>");
+    console.log("Usage: lint-plan <file.spindle.js>");
     console.log("");
     console.log("Checks:");
     console.log("  ✗ Syntax errors (nested backticks, bad JS)");

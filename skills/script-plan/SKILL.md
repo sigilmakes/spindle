@@ -1,9 +1,10 @@
 ---
 name: script-plan
 description: >
-  Create executable .js plans for the Spindle REPL. Use when planning multi-step work
-  that involves sub-agents, parallel tasks, or phased execution. Produces a .js script
-  (the executable plan) and a companion .md file (design context and rationale).
+  Create executable .spindle.js plans for the Spindle REPL. Use when planning multi-step
+  work that involves sub-agents, parallel tasks, or phased execution. Produces a
+  .spindle.js script (the executable plan) and a companion .md file (design context
+  and rationale).
 argument-hint: [topic or feature to plan]
 ---
 
@@ -19,10 +20,10 @@ Two files, colocated wherever makes sense for your project:
 
 ```
 <name>.md     ← Design context: problem, rationale, decisions, constraints
-<name>.js     ← Executable plan: discovery, orchestration, verification
+<name>.spindle.js  ← Executable plan: discovery, orchestration, verification
 ```
 
-The `.md` captures *why*. The `.js` captures *what*. The script references the markdown. A future instance reads the `.md` to understand, runs the `.js` to execute.
+The `.md` captures *why*. The `.spindle.js` captures *what*. The script references the markdown. A future instance reads the `.md` to understand, runs the `.spindle.js` to execute.
 
 ## Writing the Markdown
 
@@ -87,7 +88,7 @@ ep = await llm(`Analyze ${dir}/ and summarize`, { name: dir })
 **Run the linter before execution:**
 
 ```bash
-node bin/lint-plan.mjs <path-to-plan.js>
+node bin/lint-plan.mjs <path-to-plan.spindle.js>
 ```
 
 The linter catches syntax errors, nested backticks, oversized prompts, missing names, missing error gates, and missing verification steps.

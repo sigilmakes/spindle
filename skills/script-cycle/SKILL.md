@@ -1,10 +1,10 @@
 ---
 name: script-cycle
 description: >
-  Execute one cycle of a .js script plan via Spindle REPL. Handles orientation,
-  execution, error recovery, and reporting. Use when a .js plan script exists
+  Execute one cycle of a .spindle.js plan via Spindle REPL. Handles orientation,
+  execution, error recovery, and reporting. Use when a .spindle.js plan exists
   and you want to run it or resume from a partial execution.
-argument-hint: <path-to-plan.js> [--dry-run] [--from <phase>]
+argument-hint: <path-to-plan.spindle.js> [--dry-run] [--from <phase>]
 ---
 
 # Script Cycle
@@ -15,7 +15,7 @@ Execute a cycle on: **$ARGUMENTS**
 
 ## Overview
 
-A script cycle runs an executable `.js` plan. The cycle:
+A script cycle runs a `.spindle.js` plan. The cycle:
 
 1. **Orient** — Read the companion `.md`, check git state, understand where we are
 2. **Execute** — Run the script via `spindle_exec({ file: ... })`
@@ -31,7 +31,7 @@ After execution, present results and stop. The user decides what happens next.
 Before anything else, run the linter:
 
 ```bash
-node bin/lint-plan.mjs <path-to-plan.js>
+node bin/lint-plan.mjs <path-to-plan.spindle.js>
 ```
 
 Fix any errors before proceeding. Warnings are advisory but worth reviewing — missing error gates and unnamed agents cause pain later.
@@ -44,8 +44,8 @@ Every script plan has a companion `.md`. Read both:
 // The .md tells you WHY
 plan = await load("<name>.md")
 
-// The .js tells you WHAT
-script = await load("<name>.js")
+// The .spindle.js tells you WHAT
+script = await load("<name>.spindle.js")
 ```
 
 Understand the goal, the phases, and what success looks like before running anything.
@@ -77,7 +77,7 @@ If `--from <phase>` was specified, note which phase to start from.
 
 Before executing, summarize:
 - What the plan does (from the `.md`)
-- How many phases and sub-agents it involves (from the `.js`)
+- How many phases and sub-agents it involves (from the `.spindle.js`)
 - Current codebase state
 - Whether this is a fresh run or a resumption
 
@@ -88,7 +88,7 @@ Get approval before proceeding.
 ### Fresh run
 
 ```javascript
-await spindle_exec({ file: "<path-to-plan.js>" })
+await spindle_exec({ file: "<path-to-plan.spindle.js>" })
 ```
 
 The script runs in the REPL context. Its `console.log` output appears in the tool result. Episode data from `dispatch()` and `llm()` calls is captured automatically.

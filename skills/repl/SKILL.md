@@ -135,5 +135,5 @@ help()                                               // list all builtins
 ## Script Execution
 
 ```javascript
-spindle_exec({ file: "workflows/audit.js" })    // runs in same REPL context
+spindle_exec({ file: "workflows/audit.spindle.js" })    // runs in same REPL context
 ```
