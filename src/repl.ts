@@ -2,6 +2,51 @@ import * as vm from "node:vm";
 
 const DEFAULT_OUTPUT_LIMIT = 8192;
 
+/**
+ * Wrap user code in an async IIFE, attempting to return the last expression
+ * so the REPL can auto-print it (like Node's REPL).
+ *
+ * Tries to prepend `return` to the last non-empty line. If that produces
+ * a syntax error (e.g. the last line is `if/for/while`), falls back to
+ * the original code with no return.
+ */
+function wrapWithReturn(code: string): string {
+    const lines = code.split("\n");
+
+    // Find last non-empty, non-comment line
+    let lastIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const trimmed = lines[i].trim();
+        if (trimmed && !trimmed.startsWith("//")) {
+            lastIdx = i;
+            break;
+        }
+    }
+
+    if (lastIdx < 0) return `(async () => {\n${code}\n})()`;
+
+    // Don't transform lines that are clearly not expressions
+    const lastTrimmed = lines[lastIdx].trim();
+    if (/^(if|for|while|switch|try|class|function|const|let|var)\b/.test(lastTrimmed)) {
+        return `(async () => {\n${code}\n})()`;
+    }
+
+    // Try wrapping with return
+    const before = lines.slice(0, lastIdx).join("\n");
+    const lastLine = lines[lastIdx];
+    const after = lines.slice(lastIdx + 1).join("\n"); // trailing empty lines
+    const withReturn = [before, `return ${lastLine}`, after].filter(Boolean).join("\n");
+    const candidate = `(async () => {\n${withReturn}\n})()`;
+
+    try {
+        new vm.Script(candidate, { filename: "spindle-repl-probe" });
+        return candidate;
+    } catch {
+        // Syntax error with return — fall back to original
+        return `(async () => {\n${code}\n})()`;
+    }
+}
+
 export interface ReplConfig {
     outputLimit: number;
 }
@@ -63,8 +108,9 @@ export class Repl {
             table: (data: unknown) => logs.push(Array.isArray(data) ? JSON.stringify(data, null, 2) : formatValue(data)),
         };
 
-        // Sloppy-mode async IIFE: bare assignments (x = 5) persist on the context
-        const wrapped = `(async () => {\n${code}\n})()`;
+        // Sloppy-mode async IIFE: bare assignments (x = 5) persist on the context.
+        // Try to return the last expression for auto-print (like Node REPL).
+        const wrapped = wrapWithReturn(code);
 
         let returnValue: unknown;
         let error: string | undefined;
@@ -91,6 +137,12 @@ export class Repl {
             }
         } catch (err: unknown) {
             error = formatError(err);
+        }
+
+        // Auto-print: if no console output and returnValue is meaningful, display it.
+        // Mimics Node REPL behavior where the last expression's value is shown.
+        if (logs.length === 0 && returnValue !== undefined && !error) {
+            logs.push(formatValue(returnValue));
         }
 
         const fullOutput = logs.join("\n");
@@ -142,6 +194,17 @@ export class Repl {
     }
 }
 
+/** Detect Map instances across vm context boundaries (where instanceof fails). */
+function isMapLike(value: unknown): boolean {
+    if (value instanceof Map) return true;
+    if (value === null || typeof value !== "object") return false;
+    const proto = Object.getPrototypeOf(value);
+    if (!proto || !proto.constructor) return false;
+    return proto.constructor.name === "Map"
+        && typeof (value as any).entries === "function"
+        && typeof (value as any).size === "number";
+}
+
 function formatValue(value: unknown): string {
     if (value === undefined) return "undefined";
     if (value === null) return "null";
@@ -157,11 +220,12 @@ function formatValue(value: unknown): string {
         if (r.exitCode !== 0) out += (out && !out.endsWith("\n") ? "\n" : "") + `[exit code ${r.exitCode}]`;
         return out || "(no output)";
     }
-    if (value instanceof Map) {
-        const entries = Array.from(value.entries()).slice(0, 10)
+    if (isMapLike(value)) {
+        const m = value as Map<unknown, unknown>;
+        const entries = Array.from(m.entries()).slice(0, 10)
             .map(([k, v]) => `${String(k)} => ${previewValue(v)}`);
-        const suffix = value.size > 10 ? `, ... +${value.size - 10} more` : "";
-        return `Map(${value.size}) { ${entries.join(", ")}${suffix} }`;
+        const suffix = m.size > 10 ? `, ... +${m.size - 10} more` : "";
+        return `Map(${m.size}) { ${entries.join(", ")}${suffix} }`;
     }
     if (Array.isArray(value)) {
         if (value.length <= 5) return JSON.stringify(value);
@@ -191,7 +255,7 @@ function previewValue(value: unknown): string {
     if (typeof value === "string")
         return value.length <= 50 ? `"${value}"` : `"${value.slice(0, 50)}..." (${value.length} chars)`;
     if (typeof value === "number" || typeof value === "boolean") return String(value);
-    if (value instanceof Map) return `Map(${value.size})`;
+    if (isMapLike(value)) return `Map(${(value as Map<unknown, unknown>).size})`;
     if (Array.isArray(value)) return `Array(${value.length})`;
     if (typeof value === "function") return `function ${(value as Function).name || "anonymous"}()`;
     if (typeof value === "object") {

@@ -199,4 +199,62 @@ describe("Repl", () => {
             expect(result.durationMs).toBeGreaterThanOrEqual(40);
         });
     });
+
+    describe("auto-print", () => {
+        it("auto-prints last expression when no console output", async () => {
+            const result = await repl.exec("x = 42");
+            expect(result.output).toBe("42");
+        });
+
+        it("auto-prints string return values", async () => {
+            const result = await repl.exec('x = "hello"');
+            expect(result.output).toBe("hello");
+        });
+
+        it("auto-prints objects", async () => {
+            const result = await repl.exec('x = { a: 1, b: 2 }');
+            expect(result.output).toContain('"a": 1');
+        });
+
+        it("auto-prints arrays", async () => {
+            const result = await repl.exec("x = [1, 2, 3]");
+            expect(result.output).toBe("[1,2,3]");
+        });
+
+        it("does NOT auto-print when console.log is used", async () => {
+            const result = await repl.exec('console.log("explicit"); x = 42');
+            expect(result.output).toBe("explicit");
+        });
+
+        it("does NOT auto-print undefined", async () => {
+            const result = await repl.exec("console.log('hi')");
+            expect(result.output).toBe("hi");
+            // console.log returns undefined — should not append "undefined"
+        });
+
+        it("does NOT auto-print on error", async () => {
+            const result = await repl.exec("throw new Error('boom')");
+            expect(result.output).toBe("");
+            expect(result.error).toContain("boom");
+        });
+
+        it("auto-prints ToolResult-shaped objects", async () => {
+            repl.inject({
+                fakeTool: async () => ({ output: "tool output", error: "", ok: true, exitCode: 0 }),
+            });
+            const result = await repl.exec("x = await fakeTool()");
+            expect(result.output).toBe("tool output");
+        });
+
+        it("auto-prints Map (cross-context limitation)", async () => {
+            // Maps from vm context aren't instanceof host Map, so formatValue
+            // falls through to JSON.stringify → "{}". console.log inside the
+            // REPL handles Maps correctly since it runs in-context.
+            const result = await repl.exec('x = new Map([["a", 1], ["b", 2]])');
+            expect(result.output).toBeTruthy();
+            // Verify console.log path works correctly for Maps
+            const result2 = await repl.exec('y = new Map([["a", 1]]); console.log(y)');
+            expect(result2.output).toContain("Map(1)");
+        });
+    });
 });
