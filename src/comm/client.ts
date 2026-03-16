@@ -92,8 +92,8 @@ export class CommClient {
      * @param name Optional barrier name. Defaults to "default". Use distinct
      *   names for multiple synchronization points.
      */
-    barrier(name: string = "default"): Promise<void> {
-        this.write({ type: "barrier", from: this.rank, barrierName: name });
+    barrier(name: string = "default", count?: number): Promise<void> {
+        this.write({ type: "barrier", from: this.rank, barrierName: name, barrierCount: count });
         return new Promise(resolve => {
             const waiters = this.barrierWaiters.get(name) || [];
             waiters.push(resolve);

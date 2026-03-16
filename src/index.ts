@@ -359,15 +359,17 @@ export default function spindle(pi: ExtensionAPI) {
             pi.registerTool({
                 name: "spindle_barrier",
                 label: "Barrier",
-                description: `Block until all ${size} threads reach this barrier. Use named barriers for multiple sync points. You are rank ${rank} of ${size}.`,
+                description: `Block until the specified number of threads reach this barrier. You are rank ${rank} of ${size}. If count is omitted, waits for all ${size} threads.`,
                 parameters: Type.Object({
                     name: Type.Optional(Type.String({ description: "Barrier name (default: 'default'). Use distinct names for multiple sync points." })),
+                    count: Type.Optional(Type.Number({ description: `How many threads must arrive before releasing (default: ${size}). Use when only a subset of threads participates.` })),
                 }),
                 async execute(_id, params) {
                     const barrierName = params.name ?? "default";
-                    await client.barrier(barrierName);
+                    const count = params.count ?? size;
+                    await client.barrier(barrierName, count);
                     return {
-                        content: [{ type: "text", text: `Barrier '${barrierName}' released — all ${size} threads synchronized.` }],
+                        content: [{ type: "text", text: `Barrier '${barrierName}' released — ${count} threads synchronized.` }],
                         details: undefined,
                     };
                 },

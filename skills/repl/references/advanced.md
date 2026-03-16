@@ -24,16 +24,17 @@ Inside communicating threads, these tools are available:
 
 ### Barriers
 
-Synchronize all threads at a named point before any proceeds:
+Synchronize a subset of threads at a named point:
 
 ```javascript
 results = await dispatch([
-    thread("Write types. Call spindle_barrier({name:'types'}). Then implement API."),
-    thread("Write fixtures. Call spindle_barrier({name:'types'}). Then run tests."),
+    thread("Write types. Call spindle_barrier({name:'types', count:2}). Then implement API."),
+    thread("Write fixtures. Call spindle_barrier({name:'types', count:2}). Then run tests."),
+    thread("Wait for done messages. Do NOT call the barrier."),
 ], { communicate: true })
 ```
 
-Use distinct names for multiple sync points. All threads must call the same barrier for any to unblock.
+`count` specifies how many threads must arrive before the barrier releases. Only participating threads should call it — threads that don't participate must not call the barrier or it will deadlock. If `count` is omitted it defaults to the total thread count.
 
 ## File Locking
 

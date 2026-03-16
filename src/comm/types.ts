@@ -5,4 +5,5 @@ export interface CommMessage {
     msg?: string;
     data?: unknown;
     barrierName?: string;
+    barrierCount?: number;
 }

@@ -70,6 +70,7 @@ export class CommServer {
         this.clients.clear();
         this.queued.clear();
         this.barriers.clear();
+        this.barrierCounts.clear();
 
         if (this.server) {
             await new Promise<void>(resolve => this.server!.close(() => resolve()));
@@ -146,30 +147,39 @@ export class CommServer {
         }
     }
 
+    /** Maps barrier name → expected count (set by first arrival). */
+    private barrierCounts = new Map<string, number>();
+
     private handleBarrier(msg: CommMessage): void {
         const name = msg.barrierName ?? "default";
-        if (this.size <= 0) return; // barriers require known size
+        const count = msg.barrierCount ?? this.size;
+        if (count <= 0) return;
 
         let arrived = this.barriers.get(name);
         if (!arrived) {
             arrived = new Set<number>();
             this.barriers.set(name, arrived);
+            this.barrierCounts.set(name, count);
         }
         arrived.add(msg.from);
-        this.onMessage?.(msg.from, undefined, `barrier:${name} (${arrived.size}/${this.size})`);
 
-        if (arrived.size >= this.size) {
-            // All ranks arrived — release everyone
+        const expected = this.barrierCounts.get(name)!;
+        this.onMessage?.(msg.from, undefined, `barrier:${name} (${arrived.size}/${expected})`);
+
+        if (arrived.size >= expected) {
+            // All expected ranks arrived — release only those who participated
             const release: CommMessage = {
                 type: "barrier_release",
                 from: -1,
                 barrierName: name,
             };
             const frame = encode(release);
-            for (const client of this.clients.values()) {
-                this.writeSafe(client.socket, frame);
+            for (const rank of arrived) {
+                const client = this.clients.get(rank);
+                if (client) this.writeSafe(client.socket, frame);
             }
             this.barriers.delete(name);
+            this.barrierCounts.delete(name);
         }
     }
 
