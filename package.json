@@ -34,6 +34,7 @@
     "pi-package"
   ],
   "bin": {
+    "spindle": "./bin/spindle.mjs",
     "lint-plan": "./bin/lint-plan.mjs"
   }
 }

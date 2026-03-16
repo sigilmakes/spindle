@@ -7,12 +7,17 @@ Based on ideas from [Recursive Language Models](https://arxiv.org/abs/2512.24601
 ## Install
 
 ```bash
-# Install as a pi package (extension + skills auto-discovered)
+# Install as a pi package (extension + skills + CLI auto-discovered)
 pi install /path/to/spindle
 
-# Or load directly
-pi --extension /path/to/spindle/src/index.ts
+# Link the CLI globally
+npm link    # from the spindle directory
 ```
+
+This gives you:
+- **`spindle` CLI** — run, lint, and scaffold script plans from the terminal
+- **REPL tools** — `spindle_exec` and `spindle_status` inside pi sessions
+- **Skills** — `repl`, `script-plan`, `script-cycle` loaded automatically
 
 ## Script plans
 
@@ -131,7 +136,16 @@ for await (const ep of thread("Refactor auth module", { stepped: true })) {
 }
 ```
 
-## Commands
+## CLI
+
+```bash
+spindle new refactor-auth            # Scaffold .spindle.js + .md pair
+spindle lint refactor-auth.spindle.js  # Check for issues before running
+spindle run refactor-auth.spindle.js   # Execute via pi (lints first)
+spindle run plan.spindle.js --model claude-sonnet-4-5 --no-lint
+```
+
+## Pi commands
 
 | Command | Purpose |
 |---|---|
