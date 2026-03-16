@@ -161,13 +161,29 @@ spindle run plan.spindle.js --model claude-sonnet-4-5 --no-lint
 
 ## Skills
 
-Bundled skills (auto-discovered via pi package):
+Three skills are bundled and auto-discovered via the pi package. They load on-demand — the agent only reads what's relevant to the current task.
 
-| Skill | Purpose |
-|---|---|
-| `repl` | Core REPL usage, builtins, patterns |
-| `script-plan` | Writing `.spindle.js` plans with companion docs |
-| `script-cycle` | Executing plans, handling failures, reporting |
+**`repl`** — Core REPL usage. Covers the orient-first workflow (look before you dispatch), builtins (`grep`, `find`, `load`, `ls`), essential rules (scoping, context budget), and the sub-agent API (`llm`, `thread`, `dispatch`). References drill into sub-agent orchestration patterns, common recipes, and advanced topics (thread communication, barriers, file locking). Start here.
+
+**`script-plan`** — Writing `.spindle.js` plans. Covers the two-file pattern (`.spindle.js` for execution, `.md` for rationale), script structure (context → phases → verification), string quoting pitfalls, the linter, and what doesn't belong in a script. References cover common plan shapes: sequential pipelines, fan-out, foundation + fan-out, scout → filter → execute, conditional branching, and stepped monitoring.
+
+**`script-cycle`** — Executing plans. Covers the full cycle: lint → orient → execute → handle failures → report. Includes resumption strategies (idempotent phases vs. section commenting), common failure modes with fixes, and auto-generating reports from episode data.
+
+```
+skills/
+  repl/
+    SKILL.md                      ← Start here
+    references/
+      subagents.md                ← Dispatch, episodes, multi-round, prompt discipline
+      patterns.md                 ← Load→query, ToolResult gotchas, variable hygiene
+      advanced.md                 ← Comm, barriers, locking, recursive spindle
+  script-plan/
+    SKILL.md                      ← Writing executable plans
+    references/
+      plan-patterns.md            ← Sequential, fan-out, scout→fix, stepped
+  script-cycle/
+    SKILL.md                      ← Running plans, error recovery, reporting
+```
 
 ## Documentation
 
