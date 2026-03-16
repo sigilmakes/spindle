@@ -65,6 +65,11 @@ async function run(file, flags) {
         "--extension", extensionPath,
     ];
 
+    // Headless mode: process and exit
+    if (flags.has("--headless")) {
+        piArgs.push("--print");
+    }
+
     // Pass through model flag
     const modelIdx = process.argv.indexOf("--model");
     if (modelIdx !== -1 && process.argv[modelIdx + 1]) {
@@ -170,6 +175,7 @@ ${COLORS.bold("Usage:")}
 
 ${COLORS.bold("Run options:")}
   --no-lint                       ${COLORS.dim("Skip linting before execution")}
+  --headless                      ${COLORS.dim("Run without TUI (process and exit)")}
   --model <model>                 ${COLORS.dim("Override the model for pi")}
 
 ${COLORS.bold("Examples:")}
