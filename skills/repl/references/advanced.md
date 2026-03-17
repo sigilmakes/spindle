@@ -4,16 +4,16 @@ Thread communication, file locking, output limits, and recursive sub-agents.
 
 ## Thread Communication
 
-Threads in a `dispatch()` can exchange messages when `{ communicate: true }` is set. Each thread gets a rank (0-indexed).
+All `dispatch()` threads can exchange messages. Each thread gets a rank (0-indexed). Communication tools are always available — no opt-in needed.
 
 ```javascript
 results = await dispatch([
     thread("Define types, then broadcast to team", { spindle: true }),
     thread("Wait for types from rank 0, then implement", { spindle: true }),
-], { communicate: true })
+])
 ```
 
-Inside communicating threads, these tools are available:
+Available tools inside dispatch threads:
 
 | Tool | Purpose |
 |------|---------|
@@ -31,14 +31,14 @@ results = await dispatch([
     thread("Write types. Call spindle_barrier({name:'types', count:2}). Then implement API."),
     thread("Write fixtures. Call spindle_barrier({name:'types', count:2}). Then run tests."),
     thread("Wait for done messages. Do NOT call the barrier."),
-], { communicate: true })
+])
 ```
 
 `count` specifies how many threads must arrive before the barrier releases. Only participating threads should call it — threads that don't participate must not call the barrier or it will deadlock. If `count` is omitted it defaults to the total thread count.
 
 ## File Locking
 
-`edit`, `write`, and `save` automatically acquire cross-process file locks. If a file is locked, the call waits up to 10 seconds then fails with `FileLockError`. In communicating dispatches, lock acquire/release events are broadcast to all threads.
+`edit`, `write`, and `save` automatically acquire cross-process file locks. If a file is locked, the call waits up to 10 seconds then fails with `FileLockError`. Lock acquire/release events are broadcast to all threads.
 
 **Rule:** Dispatch threads should target non-overlapping files. Use barriers to sequence access to shared files when overlap is unavoidable.
 
