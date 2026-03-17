@@ -2,12 +2,11 @@ import { describe, it, expect } from "vitest";
 import { parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, createThreadSpec, dispatchThreads, isThreadSpec, truncateRaw, MAX_RAW_SIZE, MEMORY_WARNING_THRESHOLD, OUTPUT_DISPLAY_THRESHOLD, formatBytes } from "../src/threads.js";
 import type { Episode, ThreadState, ThreadSpec } from "../src/threads.js";
 import type { SubAgentResult } from "../src/agents.js";
-import { pruneMessages } from "../src/agents.js";
 
 function makeResult(text: string, overrides?: Partial<SubAgentResult>): SubAgentResult {
     return {
         text,
-        messages: [],
+        toolCallCount: 0,
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 0, turns: 1 },
         exitCode: 0,
         durationMs: 1000,
@@ -83,18 +82,8 @@ blockers:
         expect(ep.name).toBeUndefined();
     });
 
-    it("counts tool calls from messages", () => {
-        const result = makeResult("done", {
-            messages: [{
-                role: "assistant" as const,
-                content: [
-                    { type: "toolCall" as const, id: "1", name: "read", arguments: {} },
-                    { type: "toolCall" as const, id: "2", name: "bash", arguments: {} },
-                    { type: "text" as const, text: "done" },
-                ],
-                timestamp: Date.now(),
-            }],
-        });
+    it("counts tool calls from toolCallCount", () => {
+        const result = makeResult("done", { toolCallCount: 2 });
         expect(parseEpisode(result, { task: "t", agent: "a" }).toolCalls).toBe(2);
     });
 
@@ -361,99 +350,7 @@ describe("parseEpisode with large output (W1C)", () => {
     });
 });
 
-// --- W1C: pruneMessages ---
 
-describe("pruneMessages", () => {
-    it("returns empty array for empty input", () => {
-        expect(pruneMessages([])).toEqual([]);
-    });
-
-    it("preserves last assistant message intact", () => {
-        const largeText = "x".repeat(10_000);
-        const messages: any[] = [
-            { role: "assistant", content: [{ type: "text", text: largeText }], timestamp: 1 },
-        ];
-        const pruned = pruneMessages(messages);
-        expect(pruned[0].content[0].text).toBe(largeText);
-    });
-
-    it("prunes large text in non-final assistant messages", () => {
-        const messages: any[] = [
-            { role: "assistant", content: [{ type: "text", text: "x".repeat(1000) }], timestamp: 1 },
-            { role: "assistant", content: [{ type: "text", text: "final output" }], timestamp: 2 },
-        ];
-        const pruned = pruneMessages(messages);
-        // First assistant message text should be pruned
-        expect(pruned[0].content[0].text).toContain("[pruned:");
-        expect(pruned[0].content[0].text).toContain("1000 chars");
-        // Last assistant message should be intact
-        expect(pruned[1].content[0].text).toBe("final output");
-    });
-
-    it("preserves toolCall parts in assistant messages for counting", () => {
-        const messages: any[] = [
-            {
-                role: "assistant",
-                content: [
-                    { type: "toolCall", id: "1", name: "read", arguments: {} },
-                    { type: "toolCall", id: "2", name: "bash", arguments: {} },
-                    { type: "text", text: "x".repeat(500) },
-                ],
-                timestamp: 1,
-            },
-            { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 2 },
-        ];
-        const pruned = pruneMessages(messages);
-        // toolCall parts preserved
-        const toolCalls = pruned[0].content.filter((p: any) => p.type === "toolCall");
-        expect(toolCalls).toHaveLength(2);
-        expect(toolCalls[0].name).toBe("read");
-        expect(toolCalls[1].name).toBe("bash");
-        // large text pruned
-        const textPart = pruned[0].content.find((p: any) => p.type === "text");
-        expect(textPart.text).toContain("[pruned:");
-    });
-
-    it("prunes large tool result content", () => {
-        const messages: any[] = [
-            { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "x".repeat(5000) }] },
-            { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 1 },
-        ];
-        const pruned = pruneMessages(messages);
-        expect(pruned[0].content[0].text).toContain("[pruned:");
-        expect(pruned[0].content[0].text).toContain("5000 chars");
-    });
-
-    it("preserves small content unchanged", () => {
-        const messages: any[] = [
-            { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "short" }] },
-            { role: "assistant", content: [{ type: "text", text: "also short" }], timestamp: 1 },
-            { role: "assistant", content: [{ type: "text", text: "final" }], timestamp: 2 },
-        ];
-        const pruned = pruneMessages(messages);
-        expect(pruned[0].content[0].text).toBe("short");
-        expect(pruned[1].content[0].text).toBe("also short");
-        expect(pruned[2].content[0].text).toBe("final");
-    });
-
-    it("preserves user messages unchanged", () => {
-        const messages: any[] = [
-            { role: "user", content: "x".repeat(1000), timestamp: 1 },
-            { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 2 },
-        ];
-        const pruned = pruneMessages(messages);
-        expect(pruned[0].content).toBe("x".repeat(1000));
-    });
-
-    it("handles messages with no assistant message", () => {
-        const messages: any[] = [
-            { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "x".repeat(500) }] },
-        ];
-        const pruned = pruneMessages(messages);
-        // No last assistant, so tool result gets pruned
-        expect(pruned[0].content[0].text).toContain("[pruned:");
-    });
-});
 
 // --- W2B: Memory-aware dispatch ---
 

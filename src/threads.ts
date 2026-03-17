@@ -277,7 +277,7 @@ function createThreadGenerator(
             kind: "done",
             result: {
                 text: error?.message || "Unknown error",
-                messages: [],
+                toolCallCount: 0,
                 usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
                 exitCode: 1,
                 error: error?.message,
@@ -353,7 +353,7 @@ export async function dispatchThreads(
 ): Promise<Episode[]> {
     if (specs.length === 0) return [];
 
-    const communicate = options?.communicate ?? false;
+    const communicate = options?.communicate ?? true;
     const results: Episode[] = new Array(specs.length);
 
     // Start comm server if threads need to communicate
@@ -632,7 +632,7 @@ export function parseEpisode(result: SubAgentResult, meta: { task: string; name?
 
     const base = {
         name: meta.name,
-        toolCalls: countToolCalls(result),
+        toolCalls: result.toolCallCount,
         output: truncatedOutput,
         task: meta.task,
         agent: meta.agent,
@@ -670,16 +670,6 @@ function parseList(block: string, field: string): string[] {
     return match[1].split("\n").map(line => line.replace(/^\s*-\s*/, "").trim()).filter(Boolean);
 }
 
-function countToolCalls(result: SubAgentResult): number {
-    let count = 0;
-    for (const msg of result.messages) {
-        if (msg.role === "assistant") {
-            for (const part of msg.content) {
-                if (part.type === "toolCall") count++;
-            }
-        }
-    }
-    return count;
-}
+
 
 export { COLLAPSED_ITEM_COUNT };
