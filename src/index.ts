@@ -477,8 +477,9 @@ export default function spindle(pi: ExtensionAPI) {
             signal?.addEventListener("abort", abortCleanup, { once: true });
 
             try {
-                const result = await repl.exec(code, signal, {
-                    hoistDeclarations: !file,
+                const result = await repl.exec(code, {
+                    signal,
+                    hoist: !file,
                 });
                 const episodes = repl.lastEpisodes as Episode[];
 

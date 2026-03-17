@@ -1,6 +1,27 @@
 import * as vm from "node:vm";
+import { types } from "node:util";
+
+// --- Constants ---
 
 const DEFAULT_OUTPUT_LIMIT = 8192;
+
+/** Names injected by the host (tools, builtins). Preserved across reset, excluded from vars(). */
+const TOOL_NAMES = new Set([
+    "read", "bash", "grep", "find", "edit", "write", "ls",
+    "load", "save", "llm", "thread", "dispatch", "sleep",
+    "diff", "retry", "vars", "clear", "help",
+]);
+
+/** JS globals provided to the vm context. Excluded from vars() but NOT preserved across reset. */
+const CONTEXT_GLOBALS = new Set([
+    "console", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "Promise", "URL", "TextEncoder", "TextDecoder",
+]);
+
+/** Union of both — everything that isn't a user variable. */
+const ALL_BUILTINS = new Set([...TOOL_NAMES, ...CONTEXT_GLOBALS]);
+
+// --- Code transforms ---
 
 /**
  * Convert top-level const/let/var declarations to bare assignments so they
@@ -29,9 +50,7 @@ function hoistDeclarations(code: string): string {
     return result.join("\n");
 }
 
-/**
- * Count net brace change for a line, skipping braces inside strings and comments.
- */
+/** Count net brace change for a line, skipping braces inside strings and comments. */
 function netBraceChange(line: string): number {
     let change = 0;
     let i = 0;
@@ -73,8 +92,8 @@ function netBraceChange(line: string): number {
  * Wrap user code in an async IIFE, attempting to return the last expression
  * so the REPL can auto-print it (like Node's REPL).
  *
- * Tries to prepend `return` to the last non-empty line. If that produces
- * a syntax error (e.g. the last line is `if/for/while`), falls back to
+ * Tries to prepend `return` to the last non-empty line. If that causes a
+ * syntax error (e.g. `return for(...)`) the try/catch falls back to
  * the original code with no return.
  */
 function wrapWithReturn(code: string): string {
@@ -92,16 +111,11 @@ function wrapWithReturn(code: string): string {
 
     if (lastIdx < 0) return `(async () => {\n${code}\n})()`;
 
-    // Don't transform lines that are clearly not expressions
-    const lastTrimmed = lines[lastIdx].trim();
-    if (/^(if|for|while|switch|try|class|function|const|let|var)\b/.test(lastTrimmed)) {
-        return `(async () => {\n${code}\n})()`;
-    }
-
-    // Try wrapping with return
+    // Try wrapping with return — if the last line isn't an expression,
+    // the probe script will throw and we fall back to no return.
     const before = lines.slice(0, lastIdx).join("\n");
     const lastLine = lines[lastIdx];
-    const after = lines.slice(lastIdx + 1).join("\n"); // trailing empty lines
+    const after = lines.slice(lastIdx + 1).join("\n");
     const withReturn = [before, `return ${lastLine}`, after].filter(Boolean).join("\n");
     const candidate = `(async () => {\n${withReturn}\n})()`;
 
@@ -109,13 +123,20 @@ function wrapWithReturn(code: string): string {
         new vm.Script(candidate, { filename: "spindle-repl-probe" });
         return candidate;
     } catch {
-        // Syntax error with return — fall back to original
         return `(async () => {\n${code}\n})()`;
     }
 }
 
+// --- Public types ---
+
 export interface ReplConfig {
     outputLimit: number;
+}
+
+export interface ExecOptions {
+    signal?: AbortSignal;
+    /** Strip top-level const/let/var for persistence. Default: true. */
+    hoist?: boolean;
 }
 
 export interface ExecResult {
@@ -126,6 +147,8 @@ export interface ExecResult {
     error?: string;
     durationMs: number;
 }
+
+// --- REPL ---
 
 export class Repl {
     private context: vm.Context;
@@ -162,7 +185,8 @@ export class Repl {
         }
     }
 
-    async exec(code: string, signal?: AbortSignal, options?: { hoistDeclarations?: boolean }): Promise<ExecResult> {
+    async exec(code: string, options?: ExecOptions): Promise<ExecResult> {
+        const { signal, hoist = true } = options ?? {};
         const logs: string[] = [];
         const start = Date.now();
 
@@ -175,10 +199,7 @@ export class Repl {
             table: (data: unknown) => logs.push(Array.isArray(data) ? JSON.stringify(data, null, 2) : formatValue(data)),
         };
 
-        // Hoist const/let/var → bare assignments, then wrap in async IIFE.
-        // Sloppy mode: bare assignments persist on the vm context.
-        // Skip hoisting for file-loaded scripts where block scoping matters.
-        const prepared = (options?.hoistDeclarations ?? true) ? hoistDeclarations(code) : code;
+        const prepared = hoist ? hoistDeclarations(code) : code;
         const wrapped = wrapWithReturn(prepared);
 
         let returnValue: unknown;
@@ -209,7 +230,6 @@ export class Repl {
         }
 
         // Auto-print: if no console output and returnValue is meaningful, display it.
-        // Mimics Node REPL behavior where the last expression's value is shown.
         if (logs.length === 0 && returnValue !== undefined && !error) {
             logs.push(formatValue(returnValue));
         }
@@ -225,17 +245,9 @@ export class Repl {
     }
 
     getVariables(): Array<{ name: string; type: string; preview: string }> {
-        const builtins = new Set([
-            "console", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
-            "Promise", "URL", "TextEncoder", "TextDecoder",
-            "read", "bash", "grep", "find", "edit", "write", "ls",
-            "load", "save", "llm", "thread", "dispatch", "sleep",
-            "diff", "retry", "vars", "clear", "help",
-        ]);
-
         const vars: Array<{ name: string; type: string; preview: string }> = [];
         for (const key of Object.keys(this.context)) {
-            if (builtins.has(key)) continue;
+            if (ALL_BUILTINS.has(key)) continue;
             const value = this.context[key];
             vars.push({ name: key, type: typeof value, preview: previewValue(value) });
         }
@@ -245,13 +257,7 @@ export class Repl {
     reset(): void {
         const old = this.context;
         this.context = this.createContext();
-
-        const preserved = [
-            "read", "bash", "grep", "find", "edit", "write", "ls",
-            "load", "save", "llm", "thread", "dispatch", "sleep",
-            "diff", "retry", "vars", "clear", "help",
-        ];
-        for (const name of preserved) {
+        for (const name of TOOL_NAMES) {
             if (typeof old[name] === "function") {
                 this.context[name] = old[name];
             }
@@ -263,15 +269,18 @@ export class Repl {
     }
 }
 
-/** Detect Map instances across vm context boundaries (where instanceof fails). */
-function isMapLike(value: unknown): boolean {
-    if (value instanceof Map) return true;
-    if (value === null || typeof value !== "object") return false;
-    const proto = Object.getPrototypeOf(value);
-    if (!proto || !proto.constructor) return false;
-    return proto.constructor.name === "Map"
-        && typeof (value as any).entries === "function"
-        && typeof (value as any).size === "number";
+// --- Formatting ---
+
+/**
+ * Cross-realm type check using V8 internals (works across vm context boundaries
+ * where `instanceof` fails because constructors differ between realms).
+ */
+function isMap(value: unknown): value is Map<unknown, unknown> {
+    return types.isMap(value);
+}
+
+function isSet(value: unknown): value is Set<unknown> {
+    return types.isSet(value);
 }
 
 function formatValue(value: unknown): string {
@@ -289,12 +298,16 @@ function formatValue(value: unknown): string {
         if (r.exitCode !== 0) out += (out && !out.endsWith("\n") ? "\n" : "") + `[exit code ${r.exitCode}]`;
         return out || "(no output)";
     }
-    if (isMapLike(value)) {
-        const m = value as Map<unknown, unknown>;
-        const entries = Array.from(m.entries()).slice(0, 10)
+    if (isMap(value)) {
+        const entries = Array.from(value.entries()).slice(0, 10)
             .map(([k, v]) => `${String(k)} => ${previewValue(v)}`);
-        const suffix = m.size > 10 ? `, ... +${m.size - 10} more` : "";
-        return `Map(${m.size}) { ${entries.join(", ")}${suffix} }`;
+        const suffix = value.size > 10 ? `, ... +${value.size - 10} more` : "";
+        return `Map(${value.size}) { ${entries.join(", ")}${suffix} }`;
+    }
+    if (isSet(value)) {
+        const entries = Array.from(value).slice(0, 10).map(v => previewValue(v));
+        const suffix = value.size > 10 ? `, ... +${value.size - 10} more` : "";
+        return `Set(${value.size}) { ${entries.join(", ")}${suffix} }`;
     }
     if (Array.isArray(value)) {
         if (value.length <= 5) return JSON.stringify(value);
@@ -312,6 +325,7 @@ function formatValue(value: unknown): string {
 function formatError(err: unknown): string {
     if (!(err instanceof Error)) return String(err);
     const stack = err.stack || err.message;
+    // The IIFE wrapper adds 1 line before user code — adjust line numbers.
     return stack.split("\n")
         .filter(line => !line.includes("node:vm") && !line.includes("node:internal"))
         .map(line => line.replace(/spindle-repl:(\d+)/g, (_, n) => `line ${Math.max(1, parseInt(n) - 1)}`))
@@ -324,7 +338,8 @@ function previewValue(value: unknown): string {
     if (typeof value === "string")
         return value.length <= 50 ? `"${value}"` : `"${value.slice(0, 50)}..." (${value.length} chars)`;
     if (typeof value === "number" || typeof value === "boolean") return String(value);
-    if (isMapLike(value)) return `Map(${(value as Map<unknown, unknown>).size})`;
+    if (isMap(value)) return `Map(${value.size})`;
+    if (isSet(value)) return `Set(${value.size})`;
     if (Array.isArray(value)) return `Array(${value.length})`;
     if (typeof value === "function") return `function ${(value as Function).name || "anonymous"}()`;
     if (typeof value === "object") {

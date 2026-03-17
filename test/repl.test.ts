@@ -235,14 +235,14 @@ describe("Repl", () => {
         it("aborts on signal", async () => {
             const ac = new AbortController();
             setTimeout(() => ac.abort(), 50);
-            const result = await repl.exec("await new Promise(r => setTimeout(r, 10000))", ac.signal);
+            const result = await repl.exec("await new Promise(r => setTimeout(r, 10000))", { signal: ac.signal });
             expect(result.error).toContain("abort");
         });
 
         it("handles already-aborted signal", async () => {
             const ac = new AbortController();
             ac.abort();
-            expect((await repl.exec('console.log("hi")', ac.signal)).error).toContain("abort");
+            expect((await repl.exec('console.log("hi")', { signal: ac.signal })).error).toContain("abort");
         });
     });
 
