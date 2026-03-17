@@ -61,7 +61,7 @@ await bash({ command: "git log --oneline -10" })
 
 ## Essential Rules
 
-**Scoping.** Bare assignment (`x = 1`) persists across calls. `const` and `let` are scoped to one call and lost. Use bare assignment for anything you need later.
+**Scoping.** `const`, `let`, `var`, and bare assignments all persist across calls. Destructuring declarations (`const { a, b } = ...`, `const [x, y] = ...`) are the exception — use bare assignment for those: `({ a, b } = obj)`.
 
 **Context budget.** Output is truncated to 8192 chars. Don't dump raw data — store it in a variable and `console.log` only what you need. Use `load()` to read into variables without entering context.
 

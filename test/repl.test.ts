@@ -50,10 +50,63 @@ describe("Repl", () => {
             expect(result.output).toBe("3");
         });
 
-        it("does NOT persist const/let (block-scoped in IIFE)", async () => {
+        it("persists const declarations (hoisted to bare assignment)", async () => {
             await repl.exec("const localVar = 99");
-            const result = await repl.exec('try { console.log(localVar) } catch { console.log("gone") }');
+            const result = await repl.exec("console.log(localVar)");
+            expect(result.output).toBe("99");
+        });
+
+        it("persists let declarations (hoisted to bare assignment)", async () => {
+            await repl.exec("let counter = 0");
+            await repl.exec("counter++");
+            const result = await repl.exec("console.log(counter)");
+            expect(result.output).toBe("1");
+        });
+
+        it("persists var declarations (hoisted to bare assignment)", async () => {
+            await repl.exec("var flag = true");
+            const result = await repl.exec("console.log(flag)");
+            expect(result.output).toBe("true");
+        });
+
+        it("persists const across multiple declarations", async () => {
+            await repl.exec("const a = 1\nconst b = 2");
+            const result = await repl.exec("console.log(a + b)");
+            expect(result.output).toBe("3");
+        });
+
+        it("does not hoist destructuring (left as-is)", async () => {
+            // Object destructuring starts with { — not hoisted
+            await repl.exec("const { a, b } = { a: 1, b: 2 }");
+            const result = await repl.exec('try { console.log(a) } catch { console.log("gone") }');
             expect(result.output).toBe("gone");
+        });
+
+        it("does not hoist const/let inside callbacks (brace depth > 0)", async () => {
+            const result = await repl.exec([
+                "const handlers = [1, 2, 3].map(n => {",
+                "    const label = `item-${n}`",
+                "    return () => label",
+                "})",
+                "console.log(handlers.map(h => h()).join(','))",
+            ].join("\n"));
+            // Each closure captures its own block-scoped label
+            expect(result.output).toBe("item-1,item-2,item-3");
+        });
+
+        it("hoists top-level but not nested const", async () => {
+            await repl.exec([
+                "const outer = 'top'",
+                "function makeGreeting(name) {",
+                "    const greeting = `hello ${name}`",
+                "    return greeting",
+                "}",
+            ].join("\n"));
+            // outer persists (depth 0), greeting is block-scoped (depth 1)
+            const r1 = await repl.exec("console.log(outer)");
+            expect(r1.output).toBe("top");
+            const r2 = await repl.exec('try { console.log(greeting) } catch { console.log("gone") }');
+            expect(r2.output).toBe("gone");
         });
     });
 
@@ -203,6 +256,11 @@ describe("Repl", () => {
     describe("auto-print", () => {
         it("auto-prints last expression when no console output", async () => {
             const result = await repl.exec("x = 42");
+            expect(result.output).toBe("42");
+        });
+
+        it("auto-prints const declarations (hoisted to expression)", async () => {
+            const result = await repl.exec("const x = 42");
             expect(result.output).toBe("42");
         });
 

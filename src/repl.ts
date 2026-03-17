@@ -3,6 +3,73 @@ import * as vm from "node:vm";
 const DEFAULT_OUTPUT_LIMIT = 8192;
 
 /**
+ * Convert top-level const/let/var declarations to bare assignments so they
+ * persist on the vm context across REPL calls. "Top-level" means brace
+ * depth 0 — declarations inside callbacks, loops, and blocks keep their
+ * block scoping so closures work correctly.
+ *
+ * Only transforms declarations followed by an identifier — destructuring
+ * patterns ({, [) are left as-is.
+ */
+function hoistDeclarations(code: string): string {
+    const lines = code.split("\n");
+    let depth = 0;
+    const result: string[] = [];
+
+    for (const line of lines) {
+        let transformed = line;
+        if (depth === 0) {
+            transformed = line.replace(/^(\s*)(?:const|let|var)\s+(?=[a-zA-Z_$])/, "$1");
+        }
+        result.push(transformed);
+        depth += netBraceChange(line);
+        if (depth < 0) depth = 0;
+    }
+
+    return result.join("\n");
+}
+
+/**
+ * Count net brace change for a line, skipping braces inside strings and comments.
+ */
+function netBraceChange(line: string): number {
+    let change = 0;
+    let i = 0;
+
+    while (i < line.length) {
+        const ch = line[i];
+
+        // Single-line comment — skip rest
+        if (ch === "/" && line[i + 1] === "/") break;
+
+        // Block comment (single-line only; multi-line is rare in REPL cells)
+        if (ch === "/" && line[i + 1] === "*") {
+            const end = line.indexOf("*/", i + 2);
+            if (end === -1) break;
+            i = end + 2;
+            continue;
+        }
+
+        // String / template literals — skip to closing quote
+        if (ch === '"' || ch === "'" || ch === "`") {
+            i++;
+            while (i < line.length) {
+                if (line[i] === "\\") { i += 2; continue; }
+                if (line[i] === ch) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+
+        if (ch === "{") change++;
+        if (ch === "}") change--;
+        i++;
+    }
+
+    return change;
+}
+
+/**
  * Wrap user code in an async IIFE, attempting to return the last expression
  * so the REPL can auto-print it (like Node's REPL).
  *
@@ -95,7 +162,7 @@ export class Repl {
         }
     }
 
-    async exec(code: string, signal?: AbortSignal): Promise<ExecResult> {
+    async exec(code: string, signal?: AbortSignal, options?: { hoistDeclarations?: boolean }): Promise<ExecResult> {
         const logs: string[] = [];
         const start = Date.now();
 
@@ -108,9 +175,11 @@ export class Repl {
             table: (data: unknown) => logs.push(Array.isArray(data) ? JSON.stringify(data, null, 2) : formatValue(data)),
         };
 
-        // Sloppy-mode async IIFE: bare assignments (x = 5) persist on the context.
-        // Try to return the last expression for auto-print (like Node REPL).
-        const wrapped = wrapWithReturn(code);
+        // Hoist const/let/var → bare assignments, then wrap in async IIFE.
+        // Sloppy mode: bare assignments persist on the vm context.
+        // Skip hoisting for file-loaded scripts where block scoping matters.
+        const prepared = (options?.hoistDeclarations ?? true) ? hoistDeclarations(code) : code;
+        const wrapped = wrapWithReturn(prepared);
 
         let returnValue: unknown;
         let error: string | undefined;

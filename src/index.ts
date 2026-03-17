@@ -237,7 +237,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "  clear(name?)                Free a variable",
                 "  help()                      This message",
                 "",
-                "Scoping: bare assignment (x = ...) persists. const/let are scoped to one call.",
+                "Scoping: const, let, var, and bare assignments all persist across calls.",
             ].join("\n"),
         });
 
@@ -408,7 +408,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "  results = await dispatch(tasks)",
                 "Never hand-write similar thread() calls. Use .map() over data. Pass file paths in prompts, not file contents.",
                 "",
-                "Bare assignment persists across calls. const/let are scoped to one call.",
+                "const, let, var, and bare assignments all persist across calls.",
                 "",
                 "Search: grep({pattern,path}), find({pattern,path}), ls({path})",
                 "Files: read({path}), edit({path,oldText,newText}), write({path,content})",
@@ -477,7 +477,9 @@ export default function spindle(pi: ExtensionAPI) {
             signal?.addEventListener("abort", abortCleanup, { once: true });
 
             try {
-                const result = await repl.exec(code, signal);
+                const result = await repl.exec(code, signal, {
+                    hoistDeclarations: !file,
+                });
                 const episodes = repl.lastEpisodes as Episode[];
 
                 const parts: string[] = [];
