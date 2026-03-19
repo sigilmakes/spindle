@@ -3,7 +3,6 @@ name: repl
 description: >
   Persistent JavaScript REPL for chaining operations, transforming data, and
   dispatching sub-agents. Use when you need persistence, iteration, or orchestration.
-  For single straightforward operations, use native tools directly.
 ---
 
 # Spindle REPL
