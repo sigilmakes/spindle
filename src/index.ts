@@ -394,9 +394,10 @@ export default function spindle(pi: ExtensionAPI) {
         }),
         promptGuidelines: [
             [
-                "Use spindle_exec for ALL operations. Do not call read, edit, write, bash, grep, find, ls directly.",
+                "Use spindle_exec when you need to chain operations, transform data in JS, dispatch sub-agents, or persist state across calls.",
+                "Use native tools (read, edit, write, bash, etc.) for single straightforward operations.",
                 "",
-                "IMPORTANT: Think in JavaScript, not bash. Use grep/find/load builtins to get data, then JS to transform it.",
+                "Inside spindle_exec, think in JavaScript, not bash. Use grep/find/load builtins to get data, then JS to transform it.",
                 "  ✗ bash({command: \"find src -name '*.ts' | xargs grep 'export' | awk ...\"})  ← shell for data extraction",
                 "  ✓ hits = await grep({pattern: 'export class', path: 'src/'})                  ← builtin + JS filtering",
                 "  ✓ src = await load('src/'); [...src.entries()].filter(...)                     ← load + transform",

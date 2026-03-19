@@ -1,11 +1,9 @@
 ---
 name: repl
 description: >
-  Persistent JavaScript REPL for tool calls, file I/O, and sub-agent orchestration.
-  Use spindle_exec for all operations instead of calling native tools directly.
-  Use grep/find/load builtins and JavaScript to search code and manipulate data —
-  not bash one-liners. Use for reading/editing files, dispatching parallel sub-agents,
-  and scripting multi-step workflows programmatically.
+  Persistent JavaScript REPL for chaining operations, transforming data, and
+  dispatching sub-agents. Use when you need persistence, iteration, or orchestration.
+  For single straightforward operations, use native tools directly.
 ---
 
 # Spindle REPL
