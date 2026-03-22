@@ -11,6 +11,7 @@ description: >
 > - **`./references/subagents.md`** — Dispatching sub-agents, episode structure, multi-round patterns
 > - **`./references/patterns.md`** — Common recipes, ToolResult gotchas, session hygiene
 > - **`./references/advanced.md`** — Thread communication, barriers, file locking, recursive spindle
+> - **`./references/diverge.md`** — Forked exploration: parallel agents on the same problem, git worktree isolation, evaluation and merge
 
 A persistent JavaScript environment. Variables survive across calls. Use it to load data, transform it with code, and act on the results.
 
