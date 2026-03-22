@@ -29,25 +29,6 @@ Skip it when:
 | **3** | Default — good diversity, manageable cost |
 | **5** | Conversation diverge only (cheap), or highly diverse strategies |
 
-## Context Passing
-
-Sub-agents are stateless — they don't see the current conversation. If you're diverging on a question that depends on earlier discussion, **include the relevant context in the task prompt**. The orchestrating agent knows the conversation and should excerpt what matters.
-
-```javascript
-// The agent builds context from what it knows about the conversation
-context = `We're building a REST API for a task management app.
-The user wants auth that supports both service-to-service and end-user flows.
-We've already decided on PostgreSQL and are using Express.`
-
-question = "How should we structure the auth middleware?"
-
-tasks = strategies.map(s =>
-    thread(`${context}\n\n${question}\n\nStrategy: ${s.seed}`, { name: s.name })
-)
-```
-
-Keep it to what the sub-agents actually need. Don't dump the entire conversation — a few sentences of relevant context is usually enough. Point agents at files for anything complex: "Read the design doc at docs/api-design.md for full context."
-
 ## Conversation Diverge
 
 The lightweight mode. Dispatch N agents with the same question, different framings. No worktrees, no git — just parallel reasoning.
