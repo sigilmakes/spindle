@@ -55,6 +55,7 @@ export interface SpawnOptions {
     cwd?: string;
     timeout?: number;
     spindle?: boolean;
+    fork?: string | boolean;
     env?: Record<string, string>;
     onEvent?: (event: SubAgentEvent) => void;
 }
@@ -163,7 +164,17 @@ export async function spawnSubAgent(
     }
 
     const agentConfig = options.agent ? resolveAgent(agents, options.agent) : undefined;
-    const args: string[] = ["--mode", "json", "-p", "--no-session"];
+    const args: string[] = ["--mode", "json", "-p"];
+
+    // Fork from an existing session (inherits conversation context) or run ephemeral
+    let forkSessionDir: string | null = null;
+    const forkPath = typeof options.fork === "string" ? options.fork : undefined;
+    if (forkPath) {
+        forkSessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-fork-"));
+        args.push("--fork", forkPath, "--session-dir", forkSessionDir);
+    } else {
+        args.push("--no-session");
+    }
 
     const model = options.model ?? agentConfig?.model ?? options.defaultModel;
     if (model) args.push("--model", model);
@@ -324,6 +335,7 @@ export async function spawnSubAgent(
     } finally {
         if (tmpFile) try { fs.unlinkSync(tmpFile); } catch {}
         if (tmpDir) try { fs.rmdirSync(tmpDir); } catch {}
+        if (forkSessionDir) try { fs.rmSync(forkSessionDir, { recursive: true, force: true }); } catch {}
     }
 }
 

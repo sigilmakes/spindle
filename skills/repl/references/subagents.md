@@ -27,12 +27,14 @@ llm(prompt, {
     tools: ["read"],      // restrict tool access
     timeout: 60000,       // ms
     spindle: true,        // give sub-agent its own REPL
+    fork: true,           // fork current session (sub-agent inherits conversation context)
     maxOutput: false,     // disable 50KB output cap
 })
 
 thread(task, {
     // same options as llm(), plus:
     stepped: true,        // yield intermediate episodes
+    fork: true,           // fork current session
 })
 ```
 

@@ -135,6 +135,7 @@ export interface ThreadOptions {
     timeout?: number;
     spindle?: boolean;
     stepped?: boolean;
+    fork?: boolean | string;
 }
 
 export interface ThreadSpec {

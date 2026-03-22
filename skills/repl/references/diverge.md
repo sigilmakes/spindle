@@ -29,6 +29,20 @@ Skip it when:
 | **3** | Default — good diversity, manageable cost |
 | **5** | Conversation diverge only (cheap), or highly diverse strategies |
 
+## Context Passing
+
+Sub-agents are stateless by default — they don't see the current conversation. Use `fork: true` to fork the current session, giving sub-agents the full conversation history:
+
+```javascript
+tasks = strategies.map(s =>
+    thread(`Strategy: ${s.seed}\n\n${question}`, { name: s.name, fork: true })
+)
+```
+
+The sub-agent inherits the entire session context via pi's `--fork` mechanism. It sees the conversation that led to this point, then the diverge task as a new message. Forked sessions are cleaned up automatically.
+
+Use `fork: true` when the diverge question depends on earlier conversation. Skip it when the task is self-contained (e.g. "read src/api/ and design error handling" — the files are the context, not the conversation).
+
 ## Conversation Diverge
 
 The lightweight mode. Dispatch N agents with the same question, different framings. No worktrees, no git — just parallel reasoning.
@@ -64,8 +78,9 @@ strategies = [
     { name: "evolution-first", seed: "Approach from an evolvability perspective. Most room to change our minds later." },
 ]
 
+// fork: true gives each agent the full conversation context
 tasks = strategies.map(s =>
-    thread(`${question}\n\nStrategy: ${s.seed}`, { name: s.name })
+    thread(`Strategy: ${s.seed}\n\n${question}`, { name: s.name, fork: true })
 )
 results = await dispatch(tasks)
 ```

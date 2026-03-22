@@ -84,6 +84,7 @@ export default function spindle(pi: ExtensionAPI) {
     let repl: Repl | null = null;
     let cwd = process.cwd();
     let subModel: string | undefined;
+    let sessionFile: string | undefined;
 
     const cumulativeUsage = { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 };
 
@@ -104,7 +105,7 @@ export default function spindle(pi: ExtensionAPI) {
         r.inject({
             llm: async (prompt: string, opts?: {
                 name?: string; agent?: string; model?: string; tools?: string[];
-                timeout?: number; spindle?: boolean;
+                timeout?: number; spindle?: boolean; fork?: boolean;
                 maxOutput?: number | false;
             }) => {
                 // llm() is sugar for a single-thread dispatch — same observability
@@ -112,6 +113,7 @@ export default function spindle(pi: ExtensionAPI) {
                     name: opts?.name, agent: opts?.agent, model: opts?.model,
                     tools: opts?.tools, timeout: opts?.timeout,
                     spindle: opts?.spindle,
+                    fork: opts?.fork && sessionFile ? sessionFile : undefined,
                     defaultCwd: cwd, defaultModel: subModel,
                 }, currentSignal);
 
@@ -153,8 +155,16 @@ export default function spindle(pi: ExtensionAPI) {
         });
 
         r.inject({
-            thread: (task: string, opts?: ThreadOptions) =>
-                createThreadSpec(task, { ...opts, defaultCwd: cwd, defaultModel: subModel }, currentSignal),
+            thread: (task: string, opts?: ThreadOptions) => {
+                const resolved = { ...opts, defaultCwd: cwd, defaultModel: subModel } as any;
+                // Resolve fork: true → current session file path
+                if (opts?.fork && sessionFile) {
+                    resolved.fork = sessionFile;
+                } else {
+                    delete resolved.fork;
+                }
+                return createThreadSpec(task, resolved, currentSignal);
+            },
 
             dispatch: async (specs: ThreadSpec[], opts?: { communicate?: boolean }) => {
                 const onUpdate = currentOnUpdate;
@@ -226,7 +236,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "  thread(task, opts?)         Create a ThreadSpec for dispatch",
                 "  dispatch(specs, opts?)      Run threads in parallel → Episode[]",
                 "",
-                "  opts: { name, agent, model, tools, timeout, spindle, stepped, maxOutput }",
+                "  opts: { name, agent, model, tools, timeout, spindle, stepped, fork, maxOutput }",
                 "  Episode: { name, status, summary, findings, artifacts, blockers, output, cost }",
                 "",
                 "Utilities:",
@@ -273,6 +283,7 @@ export default function spindle(pi: ExtensionAPI) {
 
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
+        sessionFile = ctx.sessionManager.getSessionFile();
 
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
