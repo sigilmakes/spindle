@@ -106,7 +106,7 @@ export async function mcpList(
 
 /**
  * mcp_call(server, tool, args?) — One-shot tool call.
- * Creates a temporary connection, calls the tool, closes.
+ * Uses the shared pooled runtime so repeated calls reuse connections.
  */
 export async function mcpCall(
     server: string,
@@ -114,13 +114,8 @@ export async function mcpCall(
     args?: Record<string, unknown>,
 ): Promise<ToolResult> {
     try {
-        const { callOnce } = await loadMcporter();
-        const result = await callOnce({
-            server,
-            toolName,
-            args,
-            configPath: resolveConfigPath(),
-        });
+        const runtime = await getRuntime();
+        const result = await runtime.callTool(server, toolName, { args });
 
         // Extract text from MCP result
         const text = extractResultText(result);
@@ -134,13 +129,24 @@ export async function mcpCall(
  * mcp_connect(server) — Returns a persistent ServerProxy.
  * The proxy lives in REPL state and reuses the pooled runtime connection.
  * Methods are camelCase, schema-validated, return CallResult with .text()/.json()/.markdown().
+ *
+ * Unlike other MCP builtins, this throws on error (not ToolResult) because
+ * the return value is a proxy object the caller stores in a variable.
  */
 export async function mcpConnect(server: string): Promise<unknown> {
     const { createServerProxy } = await loadMcporter();
     const runtime = await getRuntime();
 
-    // Verify server exists
-    runtime.getDefinition(server);
+    // Verify server exists — throws with clear message if not found
+    try {
+        runtime.getDefinition(server);
+    } catch {
+        const available = runtime.listServers();
+        throw new Error(
+            `Unknown MCP server "${server}".` +
+            (available.length > 0 ? ` Available: ${available.join(", ")}` : " No servers configured.")
+        );
+    }
 
     const proxy = createServerProxy(runtime, server);
     _proxies.set(server, proxy);

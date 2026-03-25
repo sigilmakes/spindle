@@ -90,8 +90,8 @@ export default function spindle(pi: ExtensionAPI) {
     let sessionFile: string | undefined;
     let maxDepth = parseInt(process.env.SPINDLE_MAX_DEPTH ?? "3", 10);
 
+    // currentDepth is fixed for this process (set by parent via env)
     const currentDepth = parseInt(process.env.SPINDLE_DEPTH ?? "0", 10);
-    const atDepthLimit = currentDepth >= maxDepth;
 
     const cumulativeUsage = { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 };
 
@@ -110,20 +110,15 @@ export default function spindle(pi: ExtensionAPI) {
         r.inject({ load: fileIO.load, save: fileIO.save });
 
         // --- Depth-limited orchestration builtins ---
-        const depthError = () => {
-            throw new Error(
-                `Spawn depth limit reached (${currentDepth}/${maxDepth}). Cannot dispatch sub-agents at this depth.\n` +
-                `To increase the limit, set maxDepth in thread options or SPINDLE_MAX_DEPTH env var.`
-            );
+        /** Check at call time so /spindle config maxDepth takes effect immediately. */
+        const assertDepthAllowed = () => {
+            if (currentDepth >= maxDepth) {
+                throw new Error(
+                    `Spawn depth limit reached (${currentDepth}/${maxDepth}). Cannot dispatch sub-agents at this depth.\n` +
+                    `To increase the limit, set maxDepth in thread options or SPINDLE_MAX_DEPTH env var.`
+                );
+            }
         };
-
-        if (atDepthLimit) {
-            r.inject({
-                llm: async () => depthError(),
-                thread: () => depthError(),
-                dispatch: async () => depthError(),
-            });
-        } else {
 
         r.inject({
             llm: async (prompt: string, opts?: {
@@ -131,6 +126,7 @@ export default function spindle(pi: ExtensionAPI) {
                 timeout?: number; spindle?: boolean; fork?: boolean;
                 maxOutput?: number | false;
             }) => {
+                assertDepthAllowed();
                 // llm() is sugar for a single-thread dispatch — same observability
                 const spec = createThreadSpec(prompt, {
                     name: opts?.name, agent: opts?.agent, model: opts?.model,
@@ -179,6 +175,7 @@ export default function spindle(pi: ExtensionAPI) {
 
         r.inject({
             thread: (task: string, opts?: ThreadOptions) => {
+                assertDepthAllowed();
                 const resolved = { ...opts, defaultCwd: cwd, defaultModel: subModel } as any;
                 // Resolve fork: true → current session file path
                 if (opts?.fork && sessionFile) {
@@ -190,6 +187,7 @@ export default function spindle(pi: ExtensionAPI) {
             },
 
             dispatch: async (specs: ThreadSpec[], opts?: { communicate?: boolean }) => {
+                assertDepthAllowed();
                 const onUpdate = currentOnUpdate;
                 const code = currentCode;
                 const signal = currentSignal;
@@ -225,8 +223,6 @@ export default function spindle(pi: ExtensionAPI) {
                 return episodes;
             },
         });
-
-        } // end else (not at depth limit)
 
         r.inject({
             sleep: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)),
@@ -271,7 +267,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "",
                 "  opts: { name, agent, model, tools, timeout, spindle, stepped, fork, maxOutput, maxDepth }",
                 "  Episode: { name, status, summary, findings, artifacts, blockers, output, cost }",
-                `  Spawn depth: ${currentDepth}/${maxDepth}${atDepthLimit ? " (AT LIMIT — sub-agents disabled)" : ""}`,
+                `  Spawn depth: ${currentDepth}/${maxDepth}${currentDepth >= maxDepth ? " (AT LIMIT — sub-agents disabled)" : ""}`,
                 "",
                 "MCP (Model Context Protocol):",
                 "  mcp()                       List MCP servers",
