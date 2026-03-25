@@ -88,10 +88,10 @@ export default function spindle(pi: ExtensionAPI) {
     let cwd = process.cwd();
     let subModel: string | undefined;
     let sessionFile: string | undefined;
-    let maxDepth = parseInt(process.env.SPINDLE_MAX_DEPTH ?? "3", 10);
+    let maxDepth = parseInt(process.env.SPINDLE_MAX_DEPTH ?? "3", 10) || 3;
 
     // currentDepth is fixed for this process (set by parent via env)
-    const currentDepth = parseInt(process.env.SPINDLE_DEPTH ?? "0", 10);
+    const currentDepth = parseInt(process.env.SPINDLE_DEPTH ?? "0", 10) || 0;
 
     const cumulativeUsage = { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 };
 

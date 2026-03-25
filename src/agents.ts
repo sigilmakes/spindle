@@ -211,8 +211,8 @@ export async function spawnSubAgent(
     args.push(`Task: ${task}`);
 
     // Propagate spawn depth to sub-agents
-    const currentDepth = parseInt(process.env.SPINDLE_DEPTH ?? "0", 10);
-    const maxDepth = options.maxDepth ?? parseInt(process.env.SPINDLE_MAX_DEPTH ?? "3", 10);
+    const currentDepth = parseInt(process.env.SPINDLE_DEPTH ?? "0", 10) || 0;
+    const maxDepth = options.maxDepth ?? (parseInt(process.env.SPINDLE_MAX_DEPTH ?? "3", 10) || 3);
     const depthEnv: Record<string, string> = {
         SPINDLE_DEPTH: String(currentDepth + 1),
         SPINDLE_MAX_DEPTH: String(maxDepth),
@@ -236,7 +236,7 @@ export async function spawnSubAgent(
                 cwd: options.cwd ?? options.defaultCwd,
                 shell: false,
                 stdio: ["ignore", "pipe", "pipe"],
-                env: { ...process.env, ...depthEnv, ...options.env },
+                env: { ...process.env, ...options.env, ...depthEnv },
             });
             activeProcesses.add(proc);
             let buffer = "";

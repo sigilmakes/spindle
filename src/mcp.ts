@@ -117,8 +117,11 @@ export async function mcpCall(
         const runtime = await getRuntime();
         const result = await runtime.callTool(server, toolName, { args });
 
-        // Extract text from MCP result
+        // Extract text from MCP result, check for MCP-level errors
         const text = extractResultText(result);
+        if (typeof result === "object" && result !== null && (result as any).isError) {
+            return ToolResult.fail(text);
+        }
         return ToolResult.success(text);
     } catch (err: any) {
         return ToolResult.fail(err.message || String(err));
@@ -161,7 +164,12 @@ export async function mcpConnect(server: string): Promise<unknown> {
 export async function mcpDisconnect(server?: string): Promise<ToolResult> {
     try {
         if (_runtime) {
-            await _runtime.close(server);
+            if (server) {
+                await _runtime.close(server);
+            } else {
+                await _runtime.close();
+                _runtime = null; // Force fresh runtime on next use
+            }
         }
         if (server) {
             _proxies.delete(server);
