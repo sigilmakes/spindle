@@ -224,6 +224,62 @@ console.log("Summary written (" + allArtifacts.length + " files, " + allFindings
 
 ---
 
+## MCP: Documentation Research + Issue Creation
+
+Use MCP to pull documentation from an external API and create tracking issues.
+
+### Cell 1 — Discover and research
+
+```javascript
+// See what MCP servers are available
+servers = await mcp()
+console.log(servers.output)
+
+// Look up a library's docs via Context7
+lib = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
+console.log(lib.output)
+```
+
+### Cell 2 — Deep dive with persistent proxy
+
+```javascript
+// Create a persistent connection for repeated calls
+ctx = await mcp_connect("context7")
+
+// Fetch docs on specific topics
+hooks = await ctx.getLibraryDocs({
+    context7CompatibleLibraryID: lib.output.trim(),
+    topic: "hooks"
+})
+console.log(hooks.text().slice(0, 500))
+```
+
+### Cell 3 — Create issues from findings
+
+```javascript
+// Connect to Linear and create issues
+linear = await mcp_connect("linear")
+
+// Dispatch scouts to find deprecated API usage, then create issues
+files = [...(await load("src/")).keys()].filter(f => f.endsWith(".tsx"))
+tasks = files.map(f => thread(`Read ${f}, find deprecated React APIs. List them.`, { name: f }))
+results = await dispatch(tasks)
+
+// Create Linear issues for files with findings
+for (const ep of results.filter(r => r.findings.length > 0)) {
+    await linear.createIssue({
+        title: `Deprecated APIs in ${ep.name}`,
+        description: ep.findings.join("\n"),
+        teamId: "ENG",
+    })
+    console.log(`Created issue for ${ep.name}`)
+}
+
+await mcp_disconnect()
+```
+
+---
+
 ## Patterns Worth Noting
 
 **Variables persist between cells.** `research` from cell 1 is available in cell 2. Store intermediate results in variables rather than re-running expensive dispatches.

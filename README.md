@@ -113,6 +113,40 @@ fixes = needsWork.map(ep =>
 round2 = await dispatch(fixes)
 ```
 
+## MCP (Model Context Protocol)
+
+Call external services through MCP servers — Linear, Chrome DevTools, documentation APIs, anything with an MCP interface. Powered by [mcporter](https://github.com/steipete/mcporter).
+
+```javascript
+// Discover what's available
+await mcp()                        // list servers
+await mcp("linear")                // list tools
+
+// One-shot call
+result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
+
+// Persistent proxy — connection pooled, camelCase methods
+linear = await mcp_connect("linear")
+await linear.createIssue({ title: "Bug", team: "ENG" })
+docs = await linear.searchDocumentation({ query: "API" })
+console.log(docs.text())
+```
+
+Config: `~/.pi/agent/mcp.json` — same `mcpServers` format as Cursor/Claude/VS Code.
+
+## Spawn depth limits
+
+Sub-agents with `{ spindle: true }` can dispatch further sub-agents. Recursion is capped at a configurable depth (default: 3) to prevent runaway spawning.
+
+```javascript
+// Override for a specific sub-tree
+thread("complex task", { spindle: true, maxDepth: 5 })
+```
+
+At the limit, `llm()`/`thread()`/`dispatch()` throw an error. All other builtins still work.
+
+Configure: `/spindle config maxDepth <N>` or `SPINDLE_MAX_DEPTH` env var.
+
 ## Thread communication
 
 Threads can exchange messages and synchronize via barriers:
@@ -157,6 +191,7 @@ spindle run plan.spindle.js --model claude-sonnet-4-5 --no-lint
 | `/spindle <task>` | Prime the model for orchestration |
 | `/spindle reset` | Fresh REPL context |
 | `/spindle config subModel <model>` | Set default sub-agent model |
+| `/spindle config maxDepth <N>` | Set max spawn depth (default: 3) |
 | `/spindle status` | Show variables, usage, config |
 
 ## Skills

@@ -60,6 +60,7 @@ Returns the message as: `From rank <n>: <msg>` with optional `Data: <JSON>`.
 | `/spindle <task>` | Prime the model for wave-based orchestration on `<task>` |
 | `/spindle reset` | Fresh REPL context. Preserves built-in functions, clears user variables. |
 | `/spindle config subModel <model>` | Set the default model for sub-agents. Persisted in session. |
+| `/spindle config maxDepth <N>` | Set max spawn depth (default: 3). Persisted in session. |
 | `/spindle status` | Show variables, cumulative usage, and config |
 | `/spindle run <path.js>` | Execute a `.js`/`.mjs` script file in the REPL |
 
@@ -159,6 +160,143 @@ listing = await ls({ path: "src/" })
 
 ---
 
+## MCP (Model Context Protocol)
+
+Call external services through MCP servers. Powered by [mcporter](https://github.com/steipete/mcporter). Config: `~/.pi/agent/mcp.json`.
+
+mcporter is lazy-loaded — no startup cost until you make your first MCP call.
+
+### `mcp(server?, options?)`
+
+Discover servers and tools.
+
+```javascript
+await mcp()                             // list all configured servers
+await mcp("linear")                     // list tools for a server
+await mcp("linear", { schema: true })   // include parameter schemas
+```
+
+Returns `ToolResult`. The `output` field contains the formatted listing.
+
+### `mcp_call(server, toolName, args?)`
+
+One-shot tool call. Uses a pooled connection (reused across calls to the same server).
+
+```javascript
+result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
+console.log(result.output)   // text content from the MCP response
+console.log(result.ok)       // false if the MCP server returned isError
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `server` | `string` | yes | MCP server name (from config) |
+| `toolName` | `string` | yes | Tool name on that server |
+| `args` | `Record<string, unknown>` | no | Arguments to pass to the tool |
+
+Returns `ToolResult`. Errors from the MCP server or transport are returned as `ToolResult.fail()` (not thrown).
+
+### `mcp_connect(server)`
+
+Create a persistent proxy for repeated calls to the same server. The proxy caches schemas, validates arguments, and maps camelCase method names to the server's tool names.
+
+```javascript
+linear = await mcp_connect("linear")
+
+// Methods are camelCase — createIssue maps to create_issue
+issue = await linear.createIssue({ title: "Bug", team: "ENG" })
+
+// Results have .text(), .json(), .markdown(), .images()
+docs = await linear.searchDocumentation({ query: "API" })
+console.log(docs.text())
+console.log(docs.json())
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `server` | `string` | yes | MCP server name (from config) |
+
+Returns a `ServerProxy` (from mcporter). **Throws** on unknown server — use `mcp()` to discover available servers first.
+
+The proxy lives in the REPL variable scope and survives across `spindle_exec` calls.
+
+### `mcp_disconnect(server?)`
+
+Close MCP connections.
+
+```javascript
+await mcp_disconnect("linear")   // close one server
+await mcp_disconnect()            // close all, reset runtime
+```
+
+Returns `ToolResult`. Closing all connections also resets the internal runtime, so the next MCP call creates a fresh one.
+
+### Config format
+
+`~/.pi/agent/mcp.json` follows the standard MCP config format:
+
+```json
+{
+  "mcpServers": {
+    "context7": {
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"]
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LINEAR_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Supports `command`/`args`/`env` for stdio transports and `url`/`headers` for HTTP. Environment variable interpolation via `${VAR}` syntax.
+
+---
+
+## Spawn Depth Limits
+
+Sub-agents with `{ spindle: true }` can dispatch further sub-agents. To prevent runaway recursion, spawning is capped at a configurable depth.
+
+### Configuration
+
+| Method | Scope | Description |
+|--------|-------|-------------|
+| Default | global | Max depth is 3 |
+| `SPINDLE_MAX_DEPTH` env var | process | Override for this process and all children |
+| `/spindle config maxDepth <N>` | session | Persisted in session, takes effect immediately |
+| `thread(task, { maxDepth: N })` | sub-tree | Override for a specific sub-agent and its children |
+
+### Behaviour at the limit
+
+When `currentDepth >= maxDepth`:
+- `llm()`, `thread()`, `dispatch()` throw: `"Spawn depth limit reached (N/N). Cannot dispatch sub-agents at this depth."`
+- All other builtins work normally (`read`, `write`, `bash`, `mcp`, etc.)
+- The agent can still do useful work — just can't spawn more agents
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `SPINDLE_DEPTH` | Current depth (0 = top-level, set automatically by parent) |
+| `SPINDLE_MAX_DEPTH` | Maximum allowed depth (default: 3) |
+
+Depth env vars are always set on sub-agent processes and take precedence over `options.env` (cannot be overridden by user code).
+
+### Per-subtree override
+
+```javascript
+// Grant a specific sub-agent a deeper limit
+thread("complex multi-level task", { spindle: true, maxDepth: 5 })
+```
+
+---
+
 ## File I/O
 
 Bypass pi's truncation limits. No output enters the REPL's 8192-char console buffer — data goes straight into a variable.
@@ -219,6 +357,7 @@ summary = await llm("Summarize this code: " + code, {
 | `tools` | `string[]` | all tools | Restrict available tools |
 | `timeout` | `number` | none | Wall-clock timeout in milliseconds |
 | `spindle` | `boolean` | `false` | Give the sub-agent its own Spindle REPL ([Recursive Spindle](#recursive-spindle)) |
+| `maxDepth` | `number` | 3 | Override max spawn depth for this sub-tree ([Spawn Depth Limits](#spawn-depth-limits)) |
 
 Sub-agents run as `pi --mode json -p --no-session` processes with access to all tools including MCP and extensions. Throws on error.
 
@@ -251,6 +390,7 @@ t = thread("Analyze the auth module", { agent: "scout" })
 | `timeout` | `number` | none | Wall-clock timeout in ms |
 | `spindle` | `boolean` | `false` | Give the sub-agent its own Spindle REPL |
 | `stepped` | `boolean` | `false` | Emit intermediate episodes at checkpoints ([Stepped Threads](#stepped-threads)) |
+| `maxDepth` | `number` | 3 | Override max spawn depth for this sub-tree ([Spawn Depth Limits](#spawn-depth-limits)) |
 
 ### `dispatch(threads, options?)`
 
@@ -363,6 +503,8 @@ Communicating sub-agents receive these environment variables:
 | `SPINDLE_RANK` | This thread's rank (0-indexed) |
 | `SPINDLE_SIZE` | Total number of threads |
 | `SPINDLE_COMM` | Unix socket path for the comm server |
+| `SPINDLE_DEPTH` | Current spawn depth (0 = top-level) |
+| `SPINDLE_MAX_DEPTH` | Maximum allowed spawn depth (default: 3) |
 
 ---
 
@@ -490,11 +632,12 @@ Store large results in variables and `console.log` only what you need.
 
 ```
 src/
-├── index.ts        — extension entry, tool/command registration, lifecycle
+├── index.ts        — extension entry, tool/command registration, lifecycle, depth limits
 ├── repl.ts         — vm.Context with variable persistence, console capture, truncation
 ├── tools.ts        — built-in tool wrappers, load()/save() file I/O
-├── agents.ts       — sub-agent spawning, agent discovery, JSON streaming, usage tracking
+├── agents.ts       — sub-agent spawning, agent discovery, JSON streaming, depth propagation
 ├── threads.ts      — async generator threads, episode parsing, parallel dispatch
+├── mcp.ts          — MCP integration via mcporter (lazy-loaded runtime, connection pooling)
 ├── render.ts       — renderCall (syntax-highlighted), renderResult (column layout)
 └── comm/
     ├── index.ts    — barrel export

@@ -9,8 +9,9 @@ Spindle is a pi extension that adds a persistent JavaScript REPL with sub-agent 
 | `src/index.ts` | 423 | Extension entry point. Registers tools and commands, initializes the REPL, wires closures for dispatch/thread, manages session lifecycle and comm client setup. |
 | `src/repl.ts` | 187 | Sandboxed `vm.Context` REPL. Executes user code in sloppy-mode async IIFEs. Handles output capture, truncation, variable introspection, and reset. |
 | `src/tools.ts` | 110 | Wraps pi's built-in tools (`read`, `bash`, `grep`, `find`, `edit`, `write`, `ls`) into simple `(args) → string` functions for REPL use. Provides `load`/`save` for bulk file I/O. |
-| `src/agents.ts` | 344 | Spawns sub-agents as `pi --mode json` child processes. Discovers agent configs from `~/.pi/agent/agents/` and `.pi/agents/`. Streams JSON events, tracks usage, handles abort/timeout. |
+| `src/agents.ts` | 344 | Spawns sub-agents as `pi --mode json` child processes. Discovers agent configs from `~/.pi/agent/agents/` and `.pi/agents/`. Streams JSON events, tracks usage, handles abort/timeout. Propagates spawn depth env vars. |
 | `src/threads.ts` | 546 | Core orchestration. Defines `ThreadSpec` (lazy async generators), `dispatch` (parallel execution), episode parsing, and the comm server lifecycle for inter-thread messaging. |
+| `src/mcp.ts` | 209 | MCP integration via mcporter. Lazy-loads mcporter on first use, manages a singleton runtime for connection pooling, exposes `mcp`/`mcp_call`/`mcp_connect`/`mcp_disconnect` builtins. |
 | `src/render.ts` | 265 | TUI rendering for tool calls and results. Formats code highlighting, thread columns, dispatch progress, status output. |
 | `src/comm/server.ts` | 161 | Unix socket server for thread-to-thread communication. Routes point-to-point and broadcast messages, queues for not-yet-connected ranks. |
 | `src/comm/client.ts` | 110 | Unix socket client. Connects to the comm server, provides `send`/`recv`/`broadcast` with a waiter-based async inbox. |
@@ -29,6 +30,9 @@ graph TD
     INDEX --> THREADS["threads.ts"]
     INDEX --> RENDER["render.ts"]
     INDEX --> COMM_CLIENT["comm/client.ts"]
+    INDEX --> MCP["mcp.ts"]
+    MCP -->|"lazy import"| MCPORTER["mcporter (npm)"]
+    MCP --> TOOLS
     THREADS --> AGENTS
     THREADS --> COMM_SERVER["comm/server.ts"]
     COMM_SERVER --> FRAMING["comm/framing.ts"]
@@ -155,6 +159,25 @@ Sub-agents are full `pi` processes launched with `--mode json` (structured event
 - Parses the JSON event stream for `tool_execution_start`, `tool_execution_end`, `message_end`, and `tool_result_end` events
 - Tracks cumulative token usage across turns
 - Handles abort (SIGTERM → 5s grace → SIGKILL) and timeout
+
+### MCP via mcporter
+
+MCP integration uses [mcporter](https://github.com/steipete/mcporter) as the backend rather than building against `@modelcontextprotocol/sdk` directly. mcporter handles server discovery, transport negotiation (stdio, HTTP, SSE), OAuth, and connection pooling.
+
+Key design choices:
+
+- **Lazy loading.** mcporter is only `import()`'d when the first MCP builtin is called. This adds zero startup cost for sessions that don't use MCP.
+- **Singleton runtime.** A single `createRuntime()` instance pools connections across all `mcp_call()` invocations. `mcp_connect()` wraps this with `createServerProxy()` for ergonomic repeated calls.
+- **Config bridging.** mcporter reads `~/.pi/agent/mcp.json` (pi's config path), not its own default config. The format is compatible — both use `mcpServers` with the same server definition shape.
+- **ToolResult for one-shots.** `mcp()` and `mcp_call()` return `ToolResult` (consistent with other builtins). `mcp_connect()` returns mcporter's `ServerProxy` directly since the caller stores it in a variable and calls methods on it.
+
+### Spawn Depth Limits
+
+Recursive spindle (sub-agents with their own REPL that can dispatch further sub-agents) creates a tree of processes. Without a depth limit, a buggy or over-ambitious agent could spawn exponentially.
+
+The mechanism uses environment variables (`SPINDLE_DEPTH`, `SPINDLE_MAX_DEPTH`) propagated through `spawnSubAgent()`. The check happens at call time in `assertDepthAllowed()` (not at REPL init), so `/spindle config maxDepth` takes effect immediately without requiring a REPL reset.
+
+Depth env vars are spread **after** `options.env` in the spawn call, preventing user code from overriding the limit.
 
 ### Extension Entry & Tool Registration
 
