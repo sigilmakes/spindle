@@ -15,6 +15,7 @@ import {
 } from "./threads.js";
 import { CommClient } from "./comm/index.js";
 import { setLockNotifier, releaseAllLocks } from "./locks.js";
+import { mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup } from "./mcp.js";
 import {
     formatCodeForDisplay, formatFileExecForDisplay, formatExecResult, formatStatusResult, formatDispatchUpdate,
     type SpindleExecDetails, type SpindleStatusDetails,
@@ -77,6 +78,8 @@ export default function spindle(pi: ExtensionAPI) {
         "load", "save",
         // orchestration
         "llm", "thread", "dispatch",
+        // MCP
+        "mcp", "mcp_call", "mcp_connect", "mcp_disconnect",
         // utilities
         "sleep", "diff", "retry", "vars", "clear", "help",
     ]);
@@ -85,6 +88,10 @@ export default function spindle(pi: ExtensionAPI) {
     let cwd = process.cwd();
     let subModel: string | undefined;
     let sessionFile: string | undefined;
+    let maxDepth = parseInt(process.env.SPINDLE_MAX_DEPTH ?? "3", 10);
+
+    const currentDepth = parseInt(process.env.SPINDLE_DEPTH ?? "0", 10);
+    const atDepthLimit = currentDepth >= maxDepth;
 
     const cumulativeUsage = { totalCost: 0, totalEpisodes: 0, totalLlmCalls: 0 };
 
@@ -101,6 +108,22 @@ export default function spindle(pi: ExtensionAPI) {
 
         const fileIO = createFileIO(cwd);
         r.inject({ load: fileIO.load, save: fileIO.save });
+
+        // --- Depth-limited orchestration builtins ---
+        const depthError = () => {
+            throw new Error(
+                `Spawn depth limit reached (${currentDepth}/${maxDepth}). Cannot dispatch sub-agents at this depth.\n` +
+                `To increase the limit, set maxDepth in thread options or SPINDLE_MAX_DEPTH env var.`
+            );
+        };
+
+        if (atDepthLimit) {
+            r.inject({
+                llm: async () => depthError(),
+                thread: () => depthError(),
+                dispatch: async () => depthError(),
+            });
+        } else {
 
         r.inject({
             llm: async (prompt: string, opts?: {
@@ -203,8 +226,18 @@ export default function spindle(pi: ExtensionAPI) {
             },
         });
 
+        } // end else (not at depth limit)
+
         r.inject({
             sleep: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)),
+        });
+
+        // --- MCP builtins ---
+        r.inject({
+            mcp: mcpList,
+            mcp_call: mcpCall,
+            mcp_connect: mcpConnect,
+            mcp_disconnect: mcpDisconnect,
         });
 
         // --- Utility builtins: diff, retry, vars, clear ---
@@ -236,8 +269,17 @@ export default function spindle(pi: ExtensionAPI) {
                 "  thread(task, opts?)         Create a ThreadSpec for dispatch",
                 "  dispatch(specs, opts?)      Run threads in parallel → Episode[]",
                 "",
-                "  opts: { name, agent, model, tools, timeout, spindle, stepped, fork, maxOutput }",
+                "  opts: { name, agent, model, tools, timeout, spindle, stepped, fork, maxOutput, maxDepth }",
                 "  Episode: { name, status, summary, findings, artifacts, blockers, output, cost }",
+                `  Spawn depth: ${currentDepth}/${maxDepth}${atDepthLimit ? " (AT LIMIT — sub-agents disabled)" : ""}`,
+                "",
+                "MCP (Model Context Protocol):",
+                "  mcp()                       List MCP servers",
+                "  mcp('server')               List tools for a server",
+                "  mcp('server', {schema:true}) Include parameter schemas",
+                "  mcp_call(server, tool, args) One-shot tool call → ToolResult",
+                "  mcp_connect(server)         Persistent proxy → ServerProxy",
+                "  mcp_disconnect(server?)     Close MCP connections",
                 "",
                 "Utilities:",
                 "  sleep(ms)                   Async delay",
@@ -288,9 +330,13 @@ export default function spindle(pi: ExtensionAPI) {
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
             const entry = entries[i] as any;
-            if (entry.customType === "spindle-config" && entry.data?.subModel !== undefined) {
-                subModel = entry.data.subModel;
-                break;
+            if (entry.customType === "spindle-config") {
+                if (entry.data?.subModel !== undefined && subModel === undefined) {
+                    subModel = entry.data.subModel;
+                }
+                if (entry.data?.maxDepth !== undefined && !process.env.SPINDLE_MAX_DEPTH) {
+                    maxDepth = entry.data.maxDepth;
+                }
             }
         }
 
@@ -386,12 +432,13 @@ export default function spindle(pi: ExtensionAPI) {
         }
     });
 
-    pi.on("session_shutdown", () => {
+    pi.on("session_shutdown", async () => {
         killAllSubAgents();
         releaseAllLocks();
         setLockNotifier(null);
         commClient?.disconnect();
         commClient = null;
+        await mcpCleanup();
         repl = null;
     });
 
@@ -428,6 +475,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "Shell: bash({command}) — for builds/tests/git only",
                 "Agents: llm(prompt, opts?) → Episode, thread(task, opts?), dispatch(specs) → Episode[]",
                 "Episode: { name, status, summary, findings[], artifacts[], blockers[], output, cost }",
+                "MCP: mcp(server?) → list servers/tools, mcp_call(server, tool, args) → result, mcp_connect(server) → proxy",
                 "Utils: sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(name?), help()",
             ].join("\n"),
         ],
@@ -596,8 +644,17 @@ export default function spindle(pi: ExtensionAPI) {
                     subModel = value || undefined;
                     pi.appendEntry("spindle-config", { subModel });
                     ctx.ui.notify(`Sub-model set to: ${subModel || "(default)"}`, "info");
+                } else if (key === "maxdepth" || key === "max-depth") {
+                    const n = parseInt(value, 10);
+                    if (isNaN(n) || n < 0) {
+                        ctx.ui.notify("maxDepth must be a non-negative integer", "warning");
+                    } else {
+                        maxDepth = n;
+                        pi.appendEntry("spindle-config", { maxDepth });
+                        ctx.ui.notify(`Max spawn depth set to: ${maxDepth}`, "info");
+                    }
                 } else {
-                    ctx.ui.notify("Usage: /spindle config subModel <model>", "warning");
+                    ctx.ui.notify("Usage: /spindle config <subModel|maxDepth> <value>", "warning");
                 }
             } else if (sub === "run") {
                 const filePath = parts.slice(1).join(" ").trim();
@@ -625,3 +682,4 @@ export { spawnSubAgent, discoverAgents, resolveAgent, setExtensionDir, getExtens
 export { createThreadSpec, dispatchThreads, parseEpisode, parseEpisodeBlock, EPISODE_SUFFIX, STEPPED_EPISODE_SUFFIX, isThreadSpec } from "./threads.js";
 export type { Episode, ThreadOptions, ThreadSpec, ThreadState, DisplayItem } from "./threads.js";
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";
+export { mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup } from "./mcp.js";

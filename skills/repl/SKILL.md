@@ -119,6 +119,53 @@ results.forEach(ep => console.log(`${ep.name}: ${ep.status}`))
 
 For episode structure, options, multi-round patterns, and working with results → **`./references/subagents.md`**
 
+## MCP (Model Context Protocol)
+
+Call external services (Linear, Chrome DevTools, documentation APIs, etc.) through MCP servers.
+
+### Discovery
+
+```javascript
+await mcp()                                          // list all configured servers
+await mcp("linear")                                  // list tools for a server
+await mcp("linear", { schema: true })                // include parameter schemas
+```
+
+### One-Shot Calls
+
+```javascript
+result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
+console.log(result.output)
+```
+
+### Persistent Proxy
+
+For repeated calls to the same server — connection pooled, schema-validated, camelCase methods:
+
+```javascript
+linear = await mcp_connect("linear")
+await linear.createIssue({ title: "Bug", team: "ENG" })
+docs = await linear.searchDocumentation({ query: "API" })
+console.log(docs.text())                              // .text(), .json(), .markdown()
+
+await mcp_disconnect("linear")                        // cleanup when done
+```
+
+Config: `~/.pi/agent/mcp.json`. Same format as other MCP configs (`mcpServers` with `command`/`args`/`env` for stdio, `url`/`headers` for HTTP).
+
+## Spawn Depth Limits
+
+Sub-agents with spindle can dispatch further sub-agents. To prevent runaway recursion, spawning is capped at a configurable depth (default: 3).
+
+```javascript
+// Override depth for a specific sub-tree
+thread("complex task", { spindle: true, maxDepth: 5 })
+```
+
+At the limit, `llm()`/`thread()`/`dispatch()` throw an error. All other builtins (read, write, bash, mcp, etc.) still work. Check current depth with `help()`.
+
+Configure globally: `/spindle config maxDepth <N>` or `SPINDLE_MAX_DEPTH` env var.
+
 ## Utilities
 
 ```javascript

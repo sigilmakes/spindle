@@ -11,11 +11,12 @@
     "lint-plan": "node bin/lint-plan.mjs"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.58.1",
     "@mariozechner/pi-agent-core": "^0.58.1",
     "@mariozechner/pi-ai": "^0.58.1",
+    "@mariozechner/pi-coding-agent": "^0.58.1",
     "@mariozechner/pi-tui": "^0.58.1",
-    "@sinclair/typebox": "^0.34.48"
+    "@sinclair/typebox": "^0.34.48",
+    "mcporter": "^0.7.3"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

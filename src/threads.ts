@@ -136,6 +136,7 @@ export interface ThreadOptions {
     spindle?: boolean;
     stepped?: boolean;
     fork?: boolean | string;
+    maxDepth?: number;
 }
 
 export interface ThreadSpec {

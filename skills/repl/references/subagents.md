@@ -28,6 +28,7 @@ llm(prompt, {
     timeout: 60000,       // ms
     spindle: true,        // give sub-agent its own REPL
     fork: true,           // fork current session (sub-agent inherits conversation context)
+    maxDepth: 5,          // override spawn depth limit for this sub-tree (default: 3)
     maxOutput: false,     // disable 50KB output cap
 })
 
