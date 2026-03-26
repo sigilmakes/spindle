@@ -10,7 +10,7 @@ pi install /path/to/spindle
 
 This gives you:
 - **REPL tools** — `spindle_exec` and `spindle_status` inside pi sessions
-- **Skills** — `repl`, `mcp`, `script-plan`, `script-cycle` loaded automatically
+- **Skills** — `repl`, `mcp`, `work` loaded automatically
 - **CLI** — `spindle run`, `spindle lint`, `spindle new` from the terminal
 
 ## The REPL
@@ -172,9 +172,9 @@ Three skills bundled and auto-discovered:
 
 **`repl`** — Core REPL usage: builtins, MCP, sub-agents, depth limits. Start here. References drill into sub-agent patterns, common recipes, and advanced topics.
 
-**`script-plan`** — Writing `.spindle.js` plans: structure, quoting pitfalls, the linter. References cover common plan shapes.
+**`mcp`** — MCP server discovery and tool calls.
 
-**`script-cycle`** — Executing plans: lint → orient → execute → handle failures → report.
+**`work`** — Autonomous plan execution. Takes a plan, parses tasks, loops sub-agents over them. References cover patterns: ralph loops, ralph-critic, implementer-critic, autoresearch.
 
 ## Documentation
 
