@@ -151,9 +151,38 @@ export async function mcpConnect(server: string): Promise<unknown> {
         );
     }
 
-    const proxy = createServerProxy(runtime, server);
-    _proxies.set(server, proxy);
-    return proxy;
+    const rawProxy = createServerProxy(runtime, server);
+
+    // Wrap the proxy so that MCP errors from tool calls are caught and
+    // returned as failed ToolResults instead of crashing pi with an
+    // unhandled rejection. The raw proxy throws McpError directly, which
+    // can escape the REPL's vm context error handling.
+    const safeProxy = new Proxy(rawProxy, {
+        get(target: any, prop: string | symbol) {
+            const value = target[prop];
+            if (typeof value !== "function") return value;
+            return async (...args: unknown[]) => {
+                try {
+                    return await value.apply(target, args);
+                } catch (err: any) {
+                    // Don't re-throw — host-context rejections escape the
+                    // REPL's vm-context await and crash pi. Return an
+                    // error-shaped CallResult so the caller can inspect it.
+                    const msg = `MCP call failed: ${err.message || String(err)}`;
+                    return {
+                        text: () => msg,
+                        json: () => ({ error: msg }),
+                        markdown: () => `**Error:** ${msg}`,
+                        isError: true,
+                        content: [{ type: "text", text: msg }],
+                    };
+                }
+            };
+        },
+    });
+
+    _proxies.set(server, safeProxy);
+    return safeProxy;
 }
 
 /**
