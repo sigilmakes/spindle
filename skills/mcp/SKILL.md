@@ -1,10 +1,8 @@
 ---
 name: mcp
 description: >
-  Call external services through MCP servers — issue trackers, documentation
-  APIs, browser automation, and more. Use when you need to interact with an
-  external service, look up documentation, or integrate with tools outside
-  the codebase.
+  How to discover, configure, and call MCP servers from the Spindle REPL.
+  Use when you need to find, add, or use MCP tools.
 ---
 
 # MCP (Model Context Protocol)
