@@ -1,47 +1,59 @@
-# Sub-Agent Orchestration
+# Sub-Agents
 
-Spindle sub-agents are LLM processes you spawn from the REPL. They have full tool access, return structured episodes, and run in parallel.
+Sub-agents are LLM processes you spawn from the REPL. They have full tool access and return structured episodes.
 
-## The Basics
+## `thread()` — the composable primitive
 
-`llm(prompt, opts?)` — one-shot sub-agent, returns a single Episode.
-`thread(task, opts?)` — creates a lazy ThreadSpec (no work until iterated or dispatched).
-`dispatch(specs, opts?)` — runs ThreadSpecs in parallel, returns Episode[].
+`thread()` creates a lazy spec — the sub-agent doesn't start until consumed. You can store specs in variables, build them from data, and decide when to run them.
 
 ```javascript
-// One agent
-ep = await llm("Summarize src/auth/", { name: "auth-summary" })
+// Build tasks programmatically from data
+files = [...(await load("src/")).keys()].filter(f => f.endsWith(".ts"))
+tasks = files.map(f => thread(`Review ${f} for security issues`, { name: f }))
 
-// Many agents in parallel
-tasks = files.map(f => thread(`Review ${f}`, { name: f, agent: "scout" }))
+// Run them
 results = await dispatch(tasks)
 ```
 
 ### Options
 
 ```javascript
-llm(prompt, {
+thread(task, {
     name: "task-label",   // carried through to episode.name
     agent: "scout",       // named agent from .pi/agents/
     model: "...",         // override model
     tools: ["read"],      // restrict tool access
     timeout: 60000,       // ms
     spindle: true,        // give sub-agent its own REPL
-    fork: true,           // fork current session (sub-agent inherits conversation context)
+    stepped: true,        // yield intermediate episodes
+    fork: true,           // fork current session (inherits conversation context)
     maxDepth: 5,          // override spawn depth limit for this sub-tree (default: 3)
     maxOutput: false,     // disable 50KB output cap
 })
+```
 
-thread(task, {
-    // same options as llm(), plus:
-    stepped: true,        // yield intermediate episodes
-    fork: true,           // fork current session
-})
+## `llm()` — convenience for one-shots
+
+`llm()` is sugar for `dispatch([thread(...)])[0]`. Use it when you just need one agent to do one thing.
+
+```javascript
+ep = await llm("Summarize src/auth/", { name: "auth-summary" })
+console.log(ep.summary)
+```
+
+Same options as `thread()` except `stepped`.
+
+## `dispatch()` — parallel execution
+
+Run threads when work is **genuinely independent**. If step 2 depends on what you learned in step 1, use sequential `llm()` calls instead.
+
+```javascript
+results = await dispatch(tasks)
 ```
 
 ## Episode Structure
 
-Every sub-agent returns an Episode. These are the fields:
+Every sub-agent returns an Episode:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -53,7 +65,7 @@ Every sub-agent returns an Episode. These are the fields:
 | `blockers` | string[] | What's preventing progress (when blocked) |
 | `warnings` | string[] | File collision warnings, memory alerts |
 | `output` | string | Full agent response text (truncated to 50KB) |
-| `toolCalls` | number | How many tools the agent called — useful for spotting runaway agents |
+| `toolCalls` | number | How many tools the agent called |
 | `task` | string | The prompt you gave it |
 | `agent` | string | Agent config name (or "anonymous") |
 | `model` | string | Model used |
@@ -63,13 +75,10 @@ Every sub-agent returns an Episode. These are the fields:
 ## Working With Results
 
 ```javascript
-// Aggregate across episodes
+// Aggregate
 allFindings = results.flatMap(ep => ep.findings)
 failures = results.filter(ep => ep.status === "failure")
 totalCost = results.reduce((s, ep) => s + ep.cost, 0)
-
-// Spot runaway agents
-overworked = results.filter(ep => ep.toolCalls > 30)
 
 // Summary table
 results.forEach(ep => {
@@ -77,47 +86,41 @@ results.forEach(ep => {
 })
 ```
 
-## Multi-Round Dispatch
+## When to Dispatch vs Sequential
 
-The most natural pattern: scout broadly, then follow up on what matters.
+**Dispatch** when tasks don't need each other's output:
+- Review N files independently
+- Gather context from N sources
+- Apply a well-defined spec to N targets
+
+**Sequential** when each step informs the next:
+- Explore → decide → implement → verify
+- Anything where round 2's prompt depends on round 1's findings
+
+**Multi-round** when you want both — broad first, then targeted:
 
 ```javascript
 // Round 1: Broad exploration
 scouts = targets.map(t => thread(`Explore ${t.path}`, { name: t.name }))
 round1 = await dispatch(scouts)
 
-// Filter for interesting results
+// Filter for what matters
 interesting = round1.filter(ep =>
     ep.findings.some(f => /security|deprecated|critical/i.test(f))
 )
 
-// Round 2: Deep dive on the interesting ones
+// Round 2: Deep dive on the interesting ones only
 followups = interesting.map(ep =>
-    thread(`Deep dive on this area. Previous findings: ${ep.findings.join("; ")}`, {
+    thread(`Deep dive. Previous findings: ${ep.findings.join("; ")}`, {
         name: `followup-${ep.name}`,
     })
 )
 round2 = await dispatch(followups)
 ```
 
-This beats a single-round broadcast because you steer between rounds. The first wave is cheap recon; the second wave is targeted.
-
-## Sequential With Conditional Logic
-
-Not everything needs parallelism. Use `llm()` in a loop when each step depends on the last.
-
-```javascript
-modules = ["auth", "api", "database"]
-for (const mod of modules) {
-    ep = await llm(`Analyze src/${mod}/`, { name: mod })
-    if (ep.status === "failure") { console.log(`${mod}: failed`); continue }
-    console.log(`${mod}: ${ep.findings.length} findings`)
-}
-```
-
 ## Stepped Threads
 
-`stepped: true` makes a thread yield intermediate episodes as the agent works. Use `for await` to observe or react mid-flight.
+`stepped: true` yields intermediate episodes as the agent works. Use `for await` to observe or bail early.
 
 ```javascript
 for await (const ep of thread("Refactor auth module", { stepped: true })) {
@@ -126,62 +129,113 @@ for await (const ep of thread("Refactor auth module", { stepped: true })) {
 }
 ```
 
-This is the answer to "I can't steer mid-flight." You see checkpoints as they happen and can break out early if the agent is going off track.
+## Prompt Discipline
+
+**Short prompts, not stuffed prompts.** Pass paths, not content — sub-agents can read files themselves. Think 200-500 bytes, not 10KB.
+
+```javascript
+// ✗ Inlining content
+thread(`Analyze this code:\n${fileContent}`, { name: "review" })
+
+// ✓ Pass the path
+thread(`Analyze src/auth/login.ts for SQL injection`, { name: "review" })
+```
+
+- **Build tasks from data.** `files.map(f => thread(...))` — never hand-write repetitive calls.
+- **Name everything.** `{ name: ... }` flows through to `episode.name` and your aggregation code.
+- **Scope tightly.** "Review src/auth/login.ts for SQL injection" beats "review the codebase for security issues."
 
 ## Discover, Then Dispatch
 
 Discovery results flow directly into dispatch. **Never hand-write a target list that could be derived from a variable.**
 
 ```javascript
-// ✗ WRONG — ran ls, read the output, then typed this from memory
-entries = await ls({ path: "src/" })
-console.log(entries.output)  // prints: auth/ api/ db/ utils/
-// ... next spindle_exec call:
-areas = [
-    { name: "auth", files: ["src/auth/login.ts", "src/auth/session.ts"] },
-    { name: "api", files: ["src/api/routes.ts", "src/api/middleware.ts"] },
-]  // ← you just typed what you saw. The data was RIGHT THERE.
+// ✗ You read ls output and typed this from memory
+areas = ["auth", "api", "db"]
 
-// ✓ RIGHT — the variable IS the task list
+// ✓ The variable IS the task list
 dirs = (await ls({ path: "src/" })).output.split("\n").filter(d => d.endsWith("/")).map(d => d.slice(0, -1))
 tasks = dirs.map(dir => thread(`Explore src/${dir}/`, { name: dir }))
 results = await dispatch(tasks)
 ```
 
-For nested structure, build the full picture into a variable first:
+The test: **if you're typing paths that appeared in a previous console.log, you've broken the pipeline.**
+
+## Git Worktrees for Isolation
+
+When parallel agents write code, they collide on files. Spindle detects this (file collision warnings in `episode.warnings`) but doesn't prevent it. Git worktrees solve this — each agent gets its own checkout.
+
+### Setup
 
 ```javascript
-topDirs = (await ls({ path: "src/" })).output.split("\n").filter(d => d.endsWith("/")).map(d => d.slice(0, -1))
-structure = {}
-for (const d of topDirs) {
-    structure[d] = (await ls({ path: `src/${d}` })).output.split("\n").filter(Boolean)
+repoRoot = (await bash({ command: "git rev-parse --show-toplevel" })).output.trim()
+currentBranch = (await bash({ command: "git branch --show-current" })).output.trim()
+loomDir = `${repoRoot}/.diverge`
+
+// Ensure .diverge/ is gitignored
+gitignore = await load(".gitignore")
+if (!gitignore.includes(".diverge")) {
+    await bash({ command: 'echo ".diverge/" >> .gitignore' })
 }
-tasks = Object.entries(structure).map(([dir, contents]) =>
-    thread(`Explore src/${dir}/. Contains: ${contents.join(", ")}`, { name: dir })
-)
+
+approaches = ["visitor-pattern", "tagged-union", "strategy-obj"]
+for (const name of approaches) {
+    await bash({ command: `git worktree add ${loomDir}/${name} -b diverge/${name} HEAD` })
+}
+```
+
+### Dispatch into worktrees
+
+Each agent gets a `cwd` and a clear instruction to work within its worktree:
+
+```javascript
+tasks = approaches.map(name => {
+    worktree = `${loomDir}/${name}`
+    return thread(
+        `You are working in: ${worktree}
+All file operations must use paths within this directory.
+Task: Refactor the AST processor using the ${name} approach.
+Run tests: cd ${worktree} && npm test
+Commit when done.`,
+        { name, spindle: true }
+    )
+})
 results = await dispatch(tasks)
 ```
 
-The test: **if you're typing file paths or directory names that appeared in a previous console.log, you've broken the pipeline.** That data is already in a variable — transform it, don't transcribe it.
+Use `spindle: true` — agents working in worktrees typically need to load files, iterate, and run tests.
 
-## Prompt Discipline
-
-**Short prompts, not stuffed prompts.** A sub-agent prompt should be a task description + file paths. Think 200-500 bytes, not 10KB. Sub-agents have full tool access — they can read files themselves. When you inline content, large areas get truncated and the sub-agent has to rediscover everything from scratch, making dozens of tool calls. Small areas work but you've wasted prompt space. Either way you lose.
+### Evaluate and merge
 
 ```javascript
-// ✗ WRONG — inlining file content into the prompt
-tasks = dirs.map(dir => {
-    content = areas[dir].map(f => f.content).join("\n")
-    return thread(`Analyze this code:\n${content}`, { name: dir })
-})
+// Check which branches pass tests
+for (const name of approaches) {
+    worktree = `${loomDir}/${name}`
+    testResult = await bash({ command: `cd ${worktree} && npm test 2>&1` })
+    diff = await bash({ command: `cd ${worktree} && git diff ${currentBranch} --stat` })
+    console.log(`${name}: ${testResult.ok ? "PASS ✓" : "FAIL ✗"}`)
+    console.log(diff.output)
+}
 
-// ✓ RIGHT — pass paths, let the agent read
-tasks = dirs.map(dir => {
-    files = areas[dir].map(f => f.path).join(", ")
-    return thread(`Analyze ${dir}/. Files: ${files}`, { name: dir })
-})
+// Merge the winner
+await bash({ command: `git merge diverge/tagged-union --no-ff -m "merge: tagged-union approach"` })
 ```
 
-- **Build tasks from data.** `files.map(f => thread(...))` not hand-written repetitive calls.
-- **Name everything.** `{ name: ... }` flows through to `episode.name`, rendering, and your aggregation code.
-- **Scope tightly.** "Review src/auth/login.ts for SQL injection" beats "review the codebase for security issues."
+### Cleanup
+
+Always clean up worktrees — they accumulate fast:
+
+```javascript
+for (const name of approaches) {
+    await bash({ command: `git worktree remove ${loomDir}/${name} --force 2>/dev/null || true` })
+    await bash({ command: `git branch -D diverge/${name} 2>/dev/null || true` })
+}
+```
+
+### When to use worktrees
+
+- **Multiple agents writing code in parallel** — the primary use case
+- **Comparing implementation approaches** — see `./diverge.md` for the full pattern
+- **Any dispatch where agents modify overlapping files**
+
+Skip worktrees when agents are read-only (reviews, analysis, context gathering) — no collisions possible.
