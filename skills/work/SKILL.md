@@ -23,7 +23,7 @@ Execute: **$ARGUMENTS**
 
 1. **Read the plan** — load the file, understand the tasks and goals
 2. **Pick a pattern** — match the work to a pattern, or use what the user asked for
-3. **Prepare** — for task-list patterns (ralph, ralph-critic): parse tasks into a structured list. For single-goal patterns (implementer-critic): extract the goal. For autoresearch: identify the metric and benchmark command.
+3. **Prepare** — for task-list patterns (ralph, ralph-critic): parse tasks into a structured list. For single-goal patterns (implementer-critic): extract the goal. For research: identify the metric and benchmark command.
 4. **Run the loop** — execute in spindle per the pattern
 5. **Report** — summarize what was done, what's left
 
@@ -36,9 +36,13 @@ Execute: **$ARGUMENTS**
 | Single goal, iterate until good | implementer-critic | `./references/implementer-critic.md` |
 | Optimizing a measurable metric | research | `./references/research.md` |
 
-Default to **ralph-critic** if unsure — it handles the common case of "implement these tasks well."
+**How to choose:**
 
-If the user specifies a pattern, use it. If they say "ralph" they mean without review. If they say "with review" or don't specify, use ralph-critic.
+- If the user specifies a pattern, use it.
+- If the work is **optimizing a measurable metric** (performance, accuracy, bundle size, latency), use **research**. The key signal: there's a benchmark command and a number to improve.
+- If the work is a **single goal** that needs iteration ("build this feature", "fix this bug properly"), use **implementer-critic**.
+- If the work is a **list of tasks**, use **ralph** (mechanical/fast) or **ralph-critic** (quality matters). Default to ralph-critic if unsure between these two.
+- If they say "ralph" they mean without review. If they say "with review" or don't specify a task-list pattern, use ralph-critic.
 
 ## Preparing Tasks (ralph, ralph-critic)
 
