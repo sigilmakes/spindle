@@ -26,6 +26,9 @@ for (const task of tasks) {
     let feedback = ""
     let approved = false
 
+    // Save checkpoint — reset to this on any revert
+    checkpoint = (await bash({ command: "git rev-parse HEAD" })).stdout.trim()
+
     // === Inner loop: implement/review ===
     for (let attempt = 0; attempt < maxReviewAttempts; attempt++) {
         // Implement
@@ -36,20 +39,20 @@ ${feedback ? `\nPrevious review feedback — address these issues:\n${feedback}`
 ${progress ? `\nWork completed so far in this plan:\n${progress}` : ""}
 
 Implement this task. Run relevant tests to verify your changes work.
-Commit when done.`, {
+Make exactly one commit when done.`, {
             name: `impl-${task.id}-${attempt}`
         })
 
         if (impl.status !== "success") {
             console.log(`❌ Implementation failed: ${impl.summary}`)
-            await bash({ command: "git checkout -- ." })
+            await bash({ command: `git reset --hard ${checkpoint}` })
             break
         }
 
         // Review
         review = await llm(`Review the most recent git changes for this task: "${task.description}"
 
-Run \`git diff HEAD~1\` to see the changes. Also run tests.
+Run \`git diff ${checkpoint}\` to see the changes. Also run tests.
 
 Evaluate:
 - Correctness: does it do what the task asks?
@@ -65,7 +68,7 @@ Do not rubber-stamp. Be rigorous.`, {
 
         if (review.status === "success") {
             approved = true
-            console.log(`✅ Approved: ${task}`)
+            console.log(`✅ Approved: ${task.description}`)
             break
         }
 
@@ -74,8 +77,8 @@ Do not rubber-stamp. Be rigorous.`, {
         console.log(`🔄 Review rejected (attempt ${attempt + 1}/${maxReviewAttempts})`)
         console.log(`   Feedback: ${feedback.slice(0, 200)}`)
 
-        // Revert the failed implementation
-        await bash({ command: "git revert HEAD --no-edit 2>/dev/null || git checkout -- ." })
+        // Reset to checkpoint — handles any number of commits cleanly
+        await bash({ command: `git reset --hard ${checkpoint}` })
     }
 
     if (approved) {
@@ -85,6 +88,7 @@ Do not rubber-stamp. Be rigorous.`, {
     } else {
         console.log(`❌ Failed after ${maxReviewAttempts} attempts: ${task.description}`)
         console.log(`Last feedback:\n${feedback}`)
+        await bash({ command: `git reset --hard ${checkpoint}` })
         console.log("Stopping — review loop exhausted. Intervene and restart.")
         break
     }
@@ -110,28 +114,18 @@ Without these, reviewers approve nearly everything and the loop degenerates into
 
 ## Revert Strategy
 
-When the reviewer rejects, the implementation must be reverted before the next attempt. Two approaches:
+The template saves a git ref (`checkpoint`) before each task and uses `git reset --hard` to revert. This is robust regardless of how many commits the implementer makes — one, three, or zero. No need to guess at `HEAD~N` or hope `git revert` handles edge cases.
 
-- `git revert HEAD --no-edit` — clean revert commit, preserves history
-- `git checkout -- .` — discard changes, no history
+The reviewer also diffs against the checkpoint (`git diff ${checkpoint}`) instead of `HEAD~1`, so it sees the full change regardless of commit count.
 
-The template tries `revert` first (preserves the record of what was tried), falls back to `checkout` if revert fails (e.g. implementer didn't commit, or made multiple commits).
+## Parallelism
 
-For more complex revert needs, use `git log --oneline -5` to find the right commit to reset to.
+The same caveats from ralph apply here, but amplified: the review cycle makes parallelism harder because each task's implement/review loop is stateful. Don't parallelize ralph-critic tasks unless they are completely file-disjoint and you're using separate worktrees or branches.
 
-## Cost
-
-Each task costs roughly: (implementation cost × attempts) + (review cost × attempts). At ~3 attempts max:
-
-- Simple task: ~$0.10-0.30
-- Medium task: ~$0.30-1.00
-- Complex task: ~$1.00-3.00
-
-A 10-task plan might cost $3-15 total.
+Sequential is the right default for this pattern.
 
 ## Gotchas
 
 - **Reviewer and implementer need different prompts.** Same prompt reviewing its own work has approval bias.
 - **The implementer gets the reviewer's feedback verbatim.** If the feedback is vague ("needs improvement"), the next attempt will be random. The review prompt must demand specifics.
-- **Revert assumes one commit per implementation.** If the implementer makes multiple commits, you need `git reset --hard HEAD~N` instead. Consider adding "make exactly one commit" to the implementation prompt.
 - **Progress string can mislead.** If a task was implemented, reverted, and re-implemented, the progress only shows the final version. Previous attempts are in git history.
