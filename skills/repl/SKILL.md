@@ -24,6 +24,8 @@ A persistent JavaScript environment with pi tools, MCP access, and sub-agent orc
 
 **Focused sub-agents.** Spawn a `thread()` for a specific job: review a file, implement a spec, gather context. Not swarms — targeted work.
 
+**The REPL keeps you in the code.** You see what's happening, you make the decisions, the agent executes. Sub-agents are tools you reach for with a specific job in mind — not autonomous workers you set loose. If you can't describe the task tightly enough that a junior dev could do it, the agent shouldn't be doing it unsupervised either.
+
 **Skip it for one-shot work.** A single `read`, a quick `bash("npm test")`, a small `edit` — use native tools directly.
 
 ## Core Principle: Think in JavaScript

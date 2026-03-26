@@ -47,6 +47,8 @@ Same options as `thread()` except `stepped`.
 
 Run threads when work is **genuinely independent**. If step 2 depends on what you learned in step 1, use sequential `llm()` calls instead.
 
+Every agent you dispatch has a local view — it can't see what the others are doing and it won't learn from their mistakes. More agents means more local decisions compounding. Prefer fewer, well-scoped agents over broad fan-outs.
+
 ```javascript
 results = await dispatch(tasks)
 ```
