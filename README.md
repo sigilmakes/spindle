@@ -1,66 +1,21 @@
 # Spindle
 
-Agent orchestration extension for [pi](https://github.com/mariozechner/pi). Gives the LLM a persistent JavaScript REPL where sub-agents are callable functions, parallel work is dispatched, and workflows are stored as `.spindle.js` scripts that can be linted, reviewed, re-run, and shared.
-
-Based on ideas from [Recursive Language Models](https://arxiv.org/abs/2512.24601) (persistent REPL with variables instead of context stuffing) and [Slate](https://randomlabs.ai/blog/slate) (thread weaving with episode-based checkpoints).
+A persistent JavaScript REPL extension for [pi](https://github.com/mariozechner/pi). Gives the agent pi tools as callable functions, MCP access to external services, and focused sub-agent orchestration — all in a persistent environment where variables survive across calls.
 
 ## Install
 
 ```bash
-# Install the CLI globally
-npm install -g /path/to/spindle
-
-# Register the extension + skills with pi
 pi install /path/to/spindle
 ```
 
 This gives you:
-- **`spindle` CLI** — `spindle run`, `spindle lint`, `spindle new` from the terminal
 - **REPL tools** — `spindle_exec` and `spindle_status` inside pi sessions
 - **Skills** — `repl`, `script-plan`, `script-cycle` loaded automatically
+- **CLI** — `spindle run`, `spindle lint`, `spindle new` from the terminal
 
-## Script plans
+## The REPL
 
-Workflows are `.spindle.js` files — real JavaScript that calls `llm()`, `dispatch()`, and `thread()`. The LLM writes them, you review them, anyone can re-run them.
-
-```javascript
-// refactor-auth.spindle.js
-
-// Phase 1: Create shared types (must complete before consumers update)
-ep = await llm("Create shared interfaces in src/types.ts", { name: "types" })
-if (ep.status !== "success") { console.log("Failed:", ep.summary); return }
-await bash({ command: "npm test" })
-
-// Phase 2: Update all consumers in parallel
-dirs = (await ls({ path: "src/" })).output.split("\n")
-    .filter(d => d.endsWith("/")).map(d => d.slice(0, -1))
-tasks = dirs.map(d => thread(`Update src/${d}/ to use new types`, { name: d }))
-results = await dispatch(tasks)
-
-// Phase 3: Verify
-await bash({ command: "npm test" })
-console.log(results.map(r => `${r.name}: ${r.status}`).join("\n"))
-```
-
-Run it:
-
-```
-/spindle run refactor-auth.spindle.js
-```
-
-Lint it first:
-
-```bash
-node bin/lint-plan.mjs refactor-auth.spindle.js
-```
-
-The linter catches syntax errors (nested backticks), oversized prompts, missing agent names, missing error gates, and missing verification steps — before you spend money on sub-agents.
-
-Scripts are paired with a companion `.md` that captures design rationale — the *why* that doesn't belong in code. The `.spindle.js` is the execution; the `.md` is the orientation.
-
-## Programmatic tool calling
-
-Tools are functions in a persistent REPL. Variables survive across calls. Load data once, query it many ways.
+A persistent JavaScript environment. Load data once, query it many ways. Chain pi tools with JS logic between them.
 
 ```javascript
 // Load an entire directory into a variable (bypasses context window)
@@ -70,35 +25,64 @@ src = await load("src/")
 exports = [...src.entries()].flatMap(([file, content]) =>
     [...content.matchAll(/export function (\w+)/g)].map(m => ({ file, fn: m[1] }))
 )
-console.log(exports.length + " exported functions")
 
-// Find unused exports (cross-reference in JS, not grep pipes)
+// Cross-reference in JS, not grep pipes
 unused = exports.filter(({ fn, file }) =>
     ![...src.entries()].some(([f, c]) => f !== file && c.includes(fn))
 )
+console.log(unused.length + " potentially unused exports")
 ```
 
-## Parallel sub-agents
+All pi tools are available as functions: `read()`, `bash()`, `grep()`, `find()`, `edit()`, `write()`, `ls()`, `load()`, `save()`.
 
-Discover targets from the filesystem, dispatch scouts in parallel, aggregate results.
+## MCP (Model Context Protocol)
+
+Call external services through MCP servers — issue trackers, documentation APIs, browser automation. Powered by [mcporter](https://github.com/steipete/mcporter), lazy-loaded on first use.
 
 ```javascript
-// Discovery drives dispatch — no hand-typed file lists
-dirs = (await ls({ path: "src/" })).output.split("\n")
-    .filter(d => d.endsWith("/")).map(d => d.slice(0, -1))
+// Discover what's available
+await mcp()                        // list servers
+await mcp("linear")                // list tools
 
-tasks = dirs.map(d => thread(`Review src/${d}/ for security issues`, { name: d }))
+// One-shot call
+result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
+
+// Persistent proxy — connection pooled, camelCase methods, schema-validated
+linear = await mcp_connect("linear")
+await linear.createIssue({ title: "Bug", team: "ENG" })
+docs = await linear.searchDocumentation({ query: "API" })
+console.log(docs.text())
+```
+
+Config: `~/.pi/agent/mcp.json` — same `mcpServers` format as Cursor/Claude/VS Code.
+
+## Sub-Agents
+
+### `thread()` — the composable primitive
+
+`thread()` creates a lazy spec you can store, pass around, and dispatch. The sub-agent doesn't start until consumed.
+
+```javascript
+// Build tasks programmatically from data
+files = [...(await load("src/")).keys()].filter(f => f.endsWith(".ts"))
+tasks = files.map(f => thread(`Review ${f} for security issues`, { name: f }))
 results = await dispatch(tasks)
 
-// Structured results: status, summary, findings, artifacts, cost, duration
+// Structured results
 critical = results.flatMap(ep => ep.findings).filter(f => /critical/i.test(f))
-failures = results.filter(r => r.status !== "success")
 totalCost = results.reduce((s, r) => s + r.cost, 0)
 ```
 
-## Multi-round dispatch
+### `llm()` — convenience for one-shots
 
-Scout broadly, then follow up on what matters.
+```javascript
+ep = await llm("Summarize the auth module")
+console.log(ep.summary)
+```
+
+### `dispatch()` — parallel execution
+
+Run threads when work is genuinely independent. If step 2 depends on step 1, use sequential calls instead.
 
 ```javascript
 // Round 1: Explore
@@ -113,43 +97,20 @@ fixes = needsWork.map(ep =>
 round2 = await dispatch(fixes)
 ```
 
-## MCP (Model Context Protocol)
+### Stepped threads
 
-Call external services through MCP servers — Linear, Chrome DevTools, documentation APIs, anything with an MCP interface. Powered by [mcporter](https://github.com/steipete/mcporter).
-
-```javascript
-// Discover what's available
-await mcp()                        // list servers
-await mcp("linear")                // list tools
-
-// One-shot call
-result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
-
-// Persistent proxy — connection pooled, camelCase methods
-linear = await mcp_connect("linear")
-await linear.createIssue({ title: "Bug", team: "ENG" })
-docs = await linear.searchDocumentation({ query: "API" })
-console.log(docs.text())
-```
-
-Config: `~/.pi/agent/mcp.json` — same `mcpServers` format as Cursor/Claude/VS Code.
-
-## Spawn depth limits
-
-Sub-agents with `{ spindle: true }` can dispatch further sub-agents. Recursion is capped at a configurable depth (default: 3) to prevent runaway spawning.
+Watch a long-running agent work:
 
 ```javascript
-// Override for a specific sub-tree
-thread("complex task", { spindle: true, maxDepth: 5 })
+for await (const ep of thread("Refactor auth module", { stepped: true })) {
+    console.log(`[${ep.status}] ${ep.summary.slice(0, 80)}`)
+    if (ep.status !== "running") break
+}
 ```
 
-At the limit, `llm()`/`thread()`/`dispatch()` throw an error. All other builtins still work.
+### Thread communication
 
-Configure: `/spindle config maxDepth <N>` or `SPINDLE_MAX_DEPTH` env var.
-
-## Thread communication
-
-Threads can exchange messages and synchronize via barriers:
+Threads can exchange messages and synchronize via barriers when needed:
 
 ```javascript
 results = await dispatch([
@@ -159,31 +120,42 @@ results = await dispatch([
 ], { communicate: true })
 ```
 
-## Stepped threads
+## Spawn Depth Limits
 
-Watch a long-running agent work and intervene if needed:
+Sub-agents with `{ spindle: true }` can dispatch further sub-agents. Recursion is capped at a configurable depth (default: 3) to prevent runaway spawning.
 
 ```javascript
-for await (const ep of thread("Refactor auth module", { stepped: true })) {
-    console.log(`[${ep.status}] ${ep.summary.slice(0, 80)}`)
-    if (ep.status !== "running") break
-}
+thread("complex task", { spindle: true, maxDepth: 5 })  // override for a sub-tree
 ```
 
-## CLI
+Configure: `/spindle config maxDepth <N>` or `SPINDLE_MAX_DEPTH` env var.
 
-Spindle ships a standalone CLI. Link it globally with `npm link` from the spindle directory.
+## Script Plans
+
+Workflows as `.spindle.js` files — real JavaScript that runs in the REPL. Paired with a companion `.md` for design rationale.
+
+```javascript
+// refactor-auth.spindle.js
+
+// Phase 1: Create shared types
+ep = await llm("Create shared interfaces in src/types.ts", { name: "types" })
+if (ep.status !== "success") { console.log("Failed:", ep.summary); return }
+await bash({ command: "npm test" })
+
+// Phase 2: Update consumers in parallel
+dirs = (await ls({ path: "src/" })).output.split("\n")
+    .filter(d => d.endsWith("/")).map(d => d.slice(0, -1))
+tasks = dirs.map(d => thread(`Update src/${d}/ to use new types`, { name: d }))
+results = await dispatch(tasks)
+```
 
 ```bash
-spindle new refactor-auth              # Scaffold a .spindle.js with phases, gates, and discovery
-spindle lint refactor-auth.spindle.js  # Catch syntax errors, missing names, oversized prompts
-spindle run refactor-auth.spindle.js   # Lint, then execute via pi
-spindle run plan.spindle.js --model claude-sonnet-4-5 --no-lint
+spindle lint refactor-auth.spindle.js   # catch errors before spending money
+spindle run refactor-auth.spindle.js    # lint then execute via pi
+spindle new refactor-auth               # scaffold a new plan
 ```
 
-`new` generates a ready-to-edit skeleton with discovery-driven dispatch, error gates, verification, and cost tracking already wired in. `lint` validates before you spend money on sub-agents. `run` lints first by default, then delegates to pi for execution.
-
-## Pi commands
+## Pi Commands
 
 | Command | Purpose |
 |---|---|
@@ -196,35 +168,19 @@ spindle run plan.spindle.js --model claude-sonnet-4-5 --no-lint
 
 ## Skills
 
-Three skills are bundled and auto-discovered via the pi package. They load on-demand — the agent only reads what's relevant to the current task.
+Three skills bundled and auto-discovered:
 
-**`repl`** — Core REPL usage. Covers the orient-first workflow (look before you dispatch), builtins (`grep`, `find`, `load`, `ls`), essential rules (scoping, context budget), and the sub-agent API (`llm`, `thread`, `dispatch`). References drill into sub-agent orchestration patterns, common recipes, and advanced topics (thread communication, barriers, file locking). Start here.
+**`repl`** — Core REPL usage: builtins, MCP, sub-agents, depth limits. Start here. References drill into sub-agent patterns, common recipes, and advanced topics.
 
-**`script-plan`** — Writing `.spindle.js` plans. Covers the two-file pattern (`.spindle.js` for execution, `.md` for rationale), script structure (context → phases → verification), string quoting pitfalls, the linter, and what doesn't belong in a script. References cover common plan shapes: sequential pipelines, fan-out, foundation + fan-out, scout → filter → execute, conditional branching, and stepped monitoring.
+**`script-plan`** — Writing `.spindle.js` plans: structure, quoting pitfalls, the linter. References cover common plan shapes.
 
-**`script-cycle`** — Executing plans. Covers the full cycle: lint → orient → execute → handle failures → report. Includes resumption strategies (idempotent phases vs. section commenting), common failure modes with fixes, and auto-generating reports from episode data.
-
-```
-skills/
-  repl/
-    SKILL.md                      ← Start here
-    references/
-      subagents.md                ← Dispatch, episodes, multi-round, prompt discipline
-      patterns.md                 ← Load→query, ToolResult gotchas, variable hygiene
-      advanced.md                 ← Comm, barriers, locking, recursive spindle
-  script-plan/
-    SKILL.md                      ← Writing executable plans
-    references/
-      plan-patterns.md            ← Sequential, fan-out, scout→fix, stepped
-  script-cycle/
-    SKILL.md                      ← Running plans, error recovery, reporting
-```
+**`script-cycle`** — Executing plans: lint → orient → execute → handle failures → report.
 
 ## Documentation
 
-- **[API Reference](docs/api.md)** — built-in tools, file I/O, sub-agents, threads, communication, episodes
+- **[API Reference](docs/api.md)** — built-in tools, MCP, sub-agents, threads, episodes
 - **[Architecture](docs/architecture.md)** — source layout and design decisions
-- **[Examples](docs/examples.md)** — security audit, coordinated research, stepped threads, recursive spindle
+- **[Examples](docs/examples.md)** — security audit, MCP orchestration, coordinated research, stepped threads
 
 ## License
 

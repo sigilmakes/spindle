@@ -1,78 +1,63 @@
 ---
 name: repl
 description: >
-  Persistent JavaScript REPL for chaining operations, transforming data, and
-  dispatching sub-agents. Use when you need persistence, iteration, or orchestration.
+  Persistent JavaScript REPL with pi tools, MCP integration, and sub-agent
+  orchestration. Use when you need persistence, tool chaining, MCP calls, or
+  focused sub-agents.
 ---
 
 # Spindle REPL
 
 > **Deeper topics — read when relevant:**
-> - **`./references/subagents.md`** — Dispatching sub-agents, episode structure, multi-round patterns
+> - **`./references/subagents.md`** — Thread options, episode structure, multi-round patterns
 > - **`./references/patterns.md`** — Common recipes, ToolResult gotchas, session hygiene
 > - **`./references/advanced.md`** — Thread communication, barriers, file locking, recursive spindle
-> - **`./references/diverge.md`** — Forked exploration: parallel agents on the same problem, git worktree isolation, evaluation and merge
+> - **`./references/diverge.md`** — Forked exploration: parallel agents on the same problem
 
-A persistent JavaScript environment. Variables survive across calls. Use it to load data, transform it with code, and act on the results.
+A persistent JavaScript environment with pi tools, MCP access, and sub-agent orchestration. Variables survive across calls.
 
 ## When to Use It
 
-The REPL pays off when you need **persistence, iteration, or orchestration** — loading data once and querying it many ways, dispatching sub-agents, chaining multi-step workflows.
+**Persistence and chaining.** Load data once, query it many ways. Chain tool calls with JS logic between them.
 
-**Skip it for one-shot work.** A single `read` to check a file, a quick `bash("npm test")`, a small `edit` — use the native tools directly. Don't wrap everything in `spindle_exec` for the sake of it.
+**MCP.** Call external services — issue trackers, documentation APIs, browser automation — programmatically.
 
-## Workflow: Orient First, Then Act
+**Focused sub-agents.** Spawn a `thread()` for a specific job: review a file, implement a spec, gather context. Not swarms — targeted work.
 
-Start every task by looking at what's there. **Store discovery results in variables — they become your input for the next step.**
-
-```javascript
-// Discovery → variable → dispatch. One pipeline, no hand-typing.
-dirs = (await ls({ path: "src/" })).output.split("\n").filter(d => d.endsWith("/")).map(d => d.slice(0, -1))
-tasks = dirs.map(d => thread(`Explore src/${d}/`, { name: d }))
-results = await dispatch(tasks)
-```
-
-**The anti-pattern:** running `ls` or `find`, reading the output, then hand-writing an array of targets based on what you saw. If you're typing file paths that appeared in a previous console.log, you've broken the pipeline. The data is *already in a variable* — use it.
+**Skip it for one-shot work.** A single `read`, a quick `bash("npm test")`, a small `edit` — use native tools directly.
 
 ## Core Principle: Think in JavaScript
 
-You have `load()`, `find()`, `grep()`, and `ls()` as structured builtins that return data you can manipulate with JavaScript. Use them instead of piping bash commands together.
+Use `load()`, `find()`, `grep()`, `ls()` as structured builtins, then transform with JS. Reserve `bash` for builds, tests, git — tools that *do things*.
 
 ```javascript
-// ✗ WRONG — bash for data extraction
-await bash({ command: "find src -name '*.ts' | xargs grep 'export class' | awk -F: '{print $1}' | sort -u" })
-
-// ✓ RIGHT — builtins + JS
+// ✓ builtins + JS
 hits = await grep({ pattern: "export class", path: "src/" })
 classes = hits.output.split("\n").map(line => {
     m = line.match(/^(.+?):.*export class (\w+)/)
     return m ? { file: m[1], name: m[2] } : null
 }).filter(Boolean)
-```
 
-**When bash IS right:** Builds, tests, git, package managers — tools that *do things*.
-
-```javascript
+// ✓ bash for builds/tests
 await bash({ command: "npm test" })
-await bash({ command: "git log --oneline -10" })
 ```
 
 ## Essential Rules
 
-**Scoping.** `const`, `let`, `var`, and bare assignments all persist across calls. Destructuring declarations (`const { a, b } = ...`, `const [x, y] = ...`) are the exception — use bare assignment for those: `({ a, b } = obj)`.
+**Scoping.** `const`, `let`, `var`, and bare assignments all persist across calls. Destructuring declarations are the exception — use bare assignment: `({ a, b } = obj)`.
 
-**Context budget.** Output is truncated to 8192 chars. Don't dump raw data — store it in a variable and `console.log` only what you need. Use `load()` to read into variables without entering context.
+**Context budget.** Output truncated to 8192 chars. Store large data in variables, `console.log` only what you need. Use `load()` to read into variables without entering context.
 
 ## Builtins
 
-All return `ToolResult { output, error, ok, exitCode }`. Check `.ok` for success.
+All tool builtins return `ToolResult { output, error, ok, exitCode }`.
 
 ### Search & Navigate
 
 ```javascript
-hits = await grep({ pattern: "TODO", path: "src/" })     // recursive search
-files = await find({ pattern: "*.test.ts", path: "src/" }) // find by glob
-entries = await ls({ path: "src/" })                       // list directory
+hits = await grep({ pattern: "TODO", path: "src/" })
+files = await find({ pattern: "*.test.ts", path: "src/" })
+entries = await ls({ path: "src/" })
 ```
 
 ### Read & Write
@@ -90,91 +75,110 @@ Data goes into a variable, not the context window.
 ```javascript
 data = await load("src/auth/")       // directory → Map<path, content>
 text = await load("config.json")     // file → string
-await save("docs/report.md", content) // write without entering context
+await save("docs/report.md", content)
 ```
 
-`load()` on a directory reads all files recursively (10MB cap). Target specific subdirectories to control scope. See `./references/patterns.md` for the load-once-query-many workflow.
-
 ### Shell
-
-For builds, tests, git — tools that *do things*, not data extraction.
 
 ```javascript
 result = await bash({ command: "npm test" })
 if (!result.ok) console.log("failed:", result.error)
 ```
 
-## Sub-Agents
+## MCP (Model Context Protocol)
 
-`llm()` runs one sub-agent. `thread()` creates a spec. `dispatch()` runs specs in parallel. All return Episodes.
+Call external services through MCP servers. Powered by mcporter, lazy-loaded on first use.
 
 ```javascript
+// Discovery
+await mcp()                                    // list servers
+await mcp("linear")                            // list tools
+await mcp("linear", { schema: true })          // include schemas
+
+// One-shot call
+result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
+
+// Persistent proxy — connection pooled, camelCase, schema-validated
+linear = await mcp_connect("linear")
+await linear.createIssue({ title: "Bug", team: "ENG" })
+docs = await linear.searchDocumentation({ query: "API" })
+console.log(docs.text())                       // .text(), .json(), .markdown()
+
+await mcp_disconnect("linear")                 // cleanup
+```
+
+Config: `~/.pi/agent/mcp.json` — standard `mcpServers` format.
+
+## Sub-Agents
+
+### `thread()` — the composable primitive
+
+`thread()` creates a lazy spec you can store, compose, and dispatch. The sub-agent doesn't start until consumed.
+
+```javascript
+// Build tasks programmatically from data
 files = [...(await load("src/")).keys()].filter(f => f.endsWith(".ts"))
 tasks = files.map(f => thread(`Review ${f} for security issues`, { name: f }))
+results = await dispatch(tasks)
+
+// Consume one at a time with for-await
+for await (const ep of thread("refactor auth module", { stepped: true })) {
+    console.log(`[${ep.status}] ${ep.summary}`)
+    if (ep.status !== "running") break
+}
+```
+
+### `llm()` — convenience for one-shots
+
+```javascript
+ep = await llm("Summarize the auth module", { name: "auth-summary" })
+console.log(ep.summary)
+```
+
+`llm()` is sugar for `dispatch([thread(...)])[0]`.
+
+### `dispatch()` — parallel execution
+
+```javascript
 results = await dispatch(tasks)
 results.forEach(ep => console.log(`${ep.name}: ${ep.status}`))
 ```
 
-**Build tasks programmatically** from data. Never hand-write similar `thread()` calls. **Pass paths, not content** — sub-agents can read files themselves. Prompts are capped at 10KB.
+Use dispatch when tasks are **genuinely independent**. If step 2 depends on step 1, just use sequential `llm()` calls.
 
-For episode structure, options, multi-round patterns, and working with results → **`./references/subagents.md`**
+### Episodes
 
-## MCP (Model Context Protocol)
+Every thread returns an `Episode`:
 
-Call external services (Linear, Chrome DevTools, documentation APIs, etc.) through MCP servers.
-
-### Discovery
-
-```javascript
-await mcp()                                          // list all configured servers
-await mcp("linear")                                  // list tools for a server
-await mcp("linear", { schema: true })                // include parameter schemas
+```
+{ name, status, summary, findings[], artifacts[], blockers[], output, cost, duration }
 ```
 
-### One-Shot Calls
+**Pass paths, not content** — sub-agents can read files themselves. Prompts are capped at 10KB.
 
-```javascript
-result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
-console.log(result.output)
-```
-
-### Persistent Proxy
-
-For repeated calls to the same server — connection pooled, schema-validated, camelCase methods:
-
-```javascript
-linear = await mcp_connect("linear")
-await linear.createIssue({ title: "Bug", team: "ENG" })
-docs = await linear.searchDocumentation({ query: "API" })
-console.log(docs.text())                              // .text(), .json(), .markdown()
-
-await mcp_disconnect("linear")                        // cleanup when done
-```
-
-Config: `~/.pi/agent/mcp.json`. Same format as other MCP configs (`mcpServers` with `command`/`args`/`env` for stdio, `url`/`headers` for HTTP).
+For options, multi-round patterns, and episode details → **`./references/subagents.md`**
 
 ## Spawn Depth Limits
 
-Sub-agents with spindle can dispatch further sub-agents. To prevent runaway recursion, spawning is capped at a configurable depth (default: 3).
+Sub-agents with spindle can dispatch further sub-agents, capped at a configurable depth (default: 3).
 
 ```javascript
-// Override depth for a specific sub-tree
-thread("complex task", { spindle: true, maxDepth: 5 })
+thread("complex task", { spindle: true, maxDepth: 5 })  // override for a sub-tree
 ```
 
-At the limit, `llm()`/`thread()`/`dispatch()` throw an error. All other builtins (read, write, bash, mcp, etc.) still work. Check current depth with `help()`.
+At the limit, `llm()`/`thread()`/`dispatch()` throw an error. Everything else still works.
 
-Configure globally: `/spindle config maxDepth <N>` or `SPINDLE_MAX_DEPTH` env var.
+Configure: `/spindle config maxDepth <N>` or `SPINDLE_MAX_DEPTH` env var.
 
 ## Utilities
 
 ```javascript
 await sleep(2000)                                   // async delay
-diff("old.ts", "new.ts")                            // unified diff (files or strings)
+diff("old.ts", "new.ts")                            // unified diff
 await retry(() => llm("..."), { attempts: 5 })       // exponential backoff
-vars()                                               // list persistent REPL variables
+vars()                                               // list persistent variables
 clear("bigData")                                     // free memory
-help()                                               // list all builtins
+help()                                               // all builtins
 ```
 
 ## Script Execution
