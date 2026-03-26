@@ -26,6 +26,11 @@ export class CommClient {
 
             socket.on("connect", () => {
                 this.socket = socket;
+                // Unref so this socket doesn't prevent the process from exiting
+                // when the agent loop finishes. The comm tools will still work
+                // while the agent is active — unref only matters when the event
+                // loop has nothing else keeping it alive.
+                socket.unref();
                 socket.write(encode({ type: "announce", from: this.rank }));
                 resolve();
             });
