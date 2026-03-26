@@ -14,9 +14,11 @@ No task list — one goal, iterated until the reviewer approves. Use when the wo
 ```javascript
 // === Setup ===
 goal = "<what to build/fix/refactor>"
-context = await load("<relevant-file-or-dir>")
 maxAttempts = 5
 feedback = ""
+
+// Save checkpoint — reset to this on any revert
+checkpoint = (await bash({ command: "git rev-parse HEAD" })).stdout.trim()
 
 // === Loop ===
 for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -26,13 +28,13 @@ for (let attempt = 0; attempt < maxAttempts; attempt++) {
 Goal: ${goal}
 ${feedback ? `\nPrevious review feedback — address ALL of these:\n${feedback}` : ""}
 
-Implement this. Run tests. Commit when done.`, {
+Implement this. Run tests. Make exactly one commit when done.`, {
         name: `impl-${attempt}`
     })
 
     if (impl.status !== "success") {
         console.log(`❌ Implementation failed: ${impl.summary}`)
-        await bash({ command: "git checkout -- ." })
+        await bash({ command: `git reset --hard ${checkpoint}` })
         continue
     }
 
@@ -41,7 +43,7 @@ Implement this. Run tests. Commit when done.`, {
 
 Goal was: ${goal}
 
-Run \`git diff HEAD~1\` to see changes. Run tests.
+Run \`git diff ${checkpoint}\` to see changes. Run tests.
 
 Evaluate:
 - Does it achieve the goal?
@@ -63,8 +65,8 @@ Status FAILURE = needs work. List every issue in findings.`, {
     feedback = review.findings.join("\n")
     console.log(`🔄 Rejected (${attempt + 1}/${maxAttempts}): ${feedback.slice(0, 200)}`)
 
-    // Revert
-    await bash({ command: "git revert HEAD --no-edit 2>/dev/null || git checkout -- ." })
+    // Reset to checkpoint — handles any number of commits cleanly
+    await bash({ command: `git reset --hard ${checkpoint}` })
 
     if (attempt === maxAttempts - 1) {
         console.log(`❌ Failed after ${maxAttempts} attempts. Last feedback:\n${feedback}`)
@@ -82,5 +84,5 @@ Status FAILURE = needs work. List every issue in findings.`, {
 ## Gotchas
 
 - **The goal must be specific.** "Make the auth better" will loop forever. "Add rate limiting to the login endpoint, max 5 attempts per minute per IP" converges.
-- **Feedback accumulates.** By attempt 3, the implementer has all previous feedback. If it keeps failing on the same point, the reviewer's feedback isn't actionable enough — consider rephrasing the review prompt.
+- **Feedback replaces, not accumulates.** Each rejection gives the implementer only the latest review's feedback. For a single goal this is usually fine — the reviewer sees the same diff each time. But if the implementer fixes issue A and introduces issue B, the feedback for B won't mention A. If this is a problem, accumulate: `feedback += "\n" + review.findings.join("\n")`.
 - **Don't loop forever.** 5 attempts is generous. If it hasn't converged by then, the task needs to be broken down or the approach rethought.

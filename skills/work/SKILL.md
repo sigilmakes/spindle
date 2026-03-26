@@ -6,7 +6,7 @@ description: >
   and loops sub-agents over them with review cycles and git-backed state.
   Use when asked to "work through this plan", "ralph over this", "autopilot",
   "execute this plan autonomously", or "loop over these tasks".
-argument-hint: <path-to-plan> [--pattern ralph|ralph-critic|implementer-critic|autoresearch]
+argument-hint: <path-to-plan> [--pattern ralph|ralph-critic|implementer-critic|research]
 ---
 
 # /work — Autonomous Plan Execution
@@ -17,13 +17,13 @@ Execute: **$ARGUMENTS**
 > - **`./references/ralph.md`** — iterate tasks, one agent per task, commit each
 > - **`./references/ralph-critic.md`** — same but with review loop per task
 > - **`./references/implementer-critic.md`** — single goal with implement/review cycles
-> - **`./references/autoresearch.md`** — optimize a metric with keep/revert
+> - **`./references/research.md`** — optimize a metric with keep/revert
 
 ## Flow
 
 1. **Read the plan** — load the file, understand the tasks and goals
 2. **Pick a pattern** — match the work to a pattern, or use what the user asked for
-3. **Parse tasks** — extract structured task list from the plan
+3. **Prepare** — for task-list patterns (ralph, ralph-critic): parse tasks into a structured list. For single-goal patterns (implementer-critic): extract the goal. For autoresearch: identify the metric and benchmark command.
 4. **Run the loop** — execute in spindle per the pattern
 5. **Report** — summarize what was done, what's left
 
@@ -34,15 +34,15 @@ Execute: **$ARGUMENTS**
 | List of tasks to implement | ralph | `./references/ralph.md` |
 | List of tasks, each needs quality review | ralph-critic | `./references/ralph-critic.md` |
 | Single goal, iterate until good | implementer-critic | `./references/implementer-critic.md` |
-| Optimizing a measurable metric | autoresearch | `./references/autoresearch.md` |
+| Optimizing a measurable metric | research | `./references/research.md` |
 
 Default to **ralph-critic** if unsure — it handles the common case of "implement these tasks well."
 
 If the user specifies a pattern, use it. If they say "ralph" they mean without review. If they say "with review" or don't specify, use ralph-critic.
 
-## Preparing Tasks
+## Preparing Tasks (ralph, ralph-critic)
 
-Read the plan — whatever format it's in — and construct a JSON task list. Each task needs an id, a description specific enough for a sub-agent to execute, and a done flag.
+For task-list patterns, read the plan — whatever format it's in — and construct a JSON task list. Each task needs an id, a description specific enough for a sub-agent to execute, and a done flag.
 
 ```javascript
 plan = await load(planFile)
@@ -65,6 +65,8 @@ The task list is yours to construct. Read the plan, break it down, order depende
 
 For resumption, save `.pi/work-tasks.json` and check it at the start of each iteration. Tasks with `done: true` get skipped.
 
+For **implementer-critic**, there's no task list — just a goal string. For **autoresearch**, see the pattern reference for setup.
+
 ## Running
 
 Read the relevant pattern reference, then run inline or as a script:
@@ -81,6 +83,8 @@ spindle_exec({ file: "path/to/work.spindle.js" })
 
 ## State & Resumption
 
+For task-list patterns (ralph, ralph-critic):
+
 - **`.pi/work-tasks.json` is the source of truth.** Update it as tasks complete. REPL variables die with the session; the file survives.
 - **Git commit after each task.** The history is the log. Each commit is a checkpoint you can revert to.
 - **To resume:** re-read `.pi/work-tasks.json`. Tasks with `done: true` get skipped. Pick up from the first incomplete one.
@@ -91,9 +95,11 @@ task.done = true
 await save(".pi/work-tasks.json", JSON.stringify(tasks, null, 2))
 ```
 
+For implementer-critic, state is simpler: check git log — either the commit is there or it isn't. For autoresearch, the metric baseline and git history are the state.
+
 ## Cleanup
 
-When all tasks are done (or the work is abandoned), delete the task file:
+For task-list patterns, delete the task file when all tasks are done (or the work is abandoned):
 
 ```javascript
 await bash({ command: "rm .pi/work-tasks.json" })
@@ -116,7 +122,7 @@ Plans come from many sources — `/plan`, kanban boards, PRDs, GitHub issues, pl
 2. **Order the tasks.** Dependencies first. If task B needs task A's output, A goes first.
 3. **Make tasks specific.** "Refactor auth" won't work unsupervised. "Extract JWT validation from auth.ts into jwt.ts" will. Split vague tasks before starting.
 4. **Identify verification.** What command proves a task is done? Tests, type checks, build, lint? Set this up before the loop.
-5. **Choose the pattern.** Task list → ralph or ralph-critic. Single goal → implementer-critic. Metric to optimize → autoresearch.
+5. **Choose the pattern.** Task list → ralph or ralph-critic. Single goal → implementer-critic. Metric to optimize → research.
 
 If a plan is too vague to extract specific tasks from, it's not ready for `/work`. Explore the codebase first, then come back with a concrete task list.
 
