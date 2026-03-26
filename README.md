@@ -10,7 +10,7 @@ pi install /path/to/spindle
 
 This gives you:
 - **REPL tools** — `spindle_exec` and `spindle_status` inside pi sessions
-- **Skills** — `repl`, `script-plan`, `script-cycle` loaded automatically
+- **Skills** — `repl`, `mcp`, `script-plan`, `script-cycle` loaded automatically
 - **CLI** — `spindle run`, `spindle lint`, `spindle new` from the terminal
 
 ## The REPL
