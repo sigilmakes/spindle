@@ -1,9 +1,8 @@
 ---
 name: repl
 description: >
-  Persistent JavaScript REPL with pi tools, MCP integration, and sub-agent
-  orchestration. Use when you need persistence, tool chaining, MCP calls, or
-  focused sub-agents.
+  How to use the Spindle REPL — persistent variables, pi tool builtins, MCP,
+  and sub-agents. Use when you need to learn the REPL API or check syntax.
 ---
 
 # Spindle REPL
