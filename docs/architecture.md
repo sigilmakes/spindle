@@ -53,7 +53,7 @@ pi (main session)
 ## Design Decisions
 
 ### One function: subagent()
-No `llm()`, no `spawn()`, no `dispatch()`. One function, one result type. `worktree` option controls isolation.
+One function, one result type. `worktree` option controls isolation.
 
 ### Subagents are isolated
 Each gets its own tmux session. With `worktree: true`, also its own filesystem. No shared state, no messaging.
