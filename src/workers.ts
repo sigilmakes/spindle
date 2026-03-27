@@ -197,12 +197,28 @@ function killTmuxSession(session: string): void {
     } catch {}
 }
 
+/** Check if the pi process is still running inside a tmux session's pane. */
+function isTmuxPaneAlive(session: string): boolean {
+    try {
+        const cmd = execSync(
+            `tmux list-panes -t ${JSON.stringify(session)} -F "#{pane_current_command}"`,
+            { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        ).trim();
+        // If the current command is a shell (bash, zsh, fish, etc.), pi has exited
+        return !/^(bash|zsh|fish|sh|dash)$/i.test(cmd);
+    } catch {
+        return false;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Status file helpers
 // ---------------------------------------------------------------------------
 
 const STATUS_DIR = ".spindle";
 const STATUS_FILE = "status.json";
+
+export { isTmuxPaneAlive };
 
 export function readStatusFile(dir: string): StatusFile | null {
     const filePath = path.join(dir, STATUS_DIR, STATUS_FILE);
@@ -242,7 +258,7 @@ function buildPiCommand(
 ): string {
     // SPINDLE_STATUS_DIR tells the worker extension where to write status.json
     const envPrefix = `SPINDLE_STATUS_DIR=${JSON.stringify(statusDir)}`;
-    const args: string[] = [envPrefix, "pi", "-p", "--no-session"];
+    const args: string[] = [envPrefix, "pi", "--no-session"];
     args.push("-e", workerExtPath);
 
     const agents = discoverAgents(cwd);

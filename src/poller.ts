@@ -2,9 +2,8 @@
  * Status Poller — polls subagent status files and drives dashboard + notifications.
  */
 
-import { execSync } from "node:child_process";
 import {
-    getActiveSubagents, readStatusFile,
+    getActiveSubagents, readStatusFile, isTmuxPaneAlive,
     type SubagentHandle, type AgentResult, type StatusFile,
 } from "./workers.js";
 
@@ -18,15 +17,6 @@ export interface PollerCallbacks {
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let pollerCallbacks: PollerCallbacks | null = null;
 const lastStatus = new Map<string, string>();
-
-function tmuxSessionExists(session: string): boolean {
-    try {
-        execSync(`tmux has-session -t ${JSON.stringify(session)}`, { stdio: "pipe" });
-        return true;
-    } catch {
-        return false;
-    }
-}
 
 function buildResult(handle: SubagentHandle, sf: StatusFile): AgentResult {
     const ep = sf.episode;
@@ -98,8 +88,12 @@ function pollOnce(): void {
             (handle as any)._resolve(result);
             pollerCallbacks?.onDone(handle, result);
             anyChanged = true;
-        } else if (!sf && !tmuxSessionExists(handle.session)) {
-            const result = crashResult(handle);
+        } else if (!isTmuxPaneAlive(handle.session)) {
+            // Pi process is dead (session gone or fell back to shell)
+            // but status file never got a terminal status — treat as crash
+            const result = sf
+                ? buildResult(handle, { ...sf, status: "crashed", exitCode: -1, endTime: Date.now() })
+                : crashResult(handle);
             (handle as any)._resolve(result);
             pollerCallbacks?.onDone(handle, result);
             anyChanged = true;
