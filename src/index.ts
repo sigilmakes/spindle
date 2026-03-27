@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execSync, spawn as nodeSpawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -398,18 +398,10 @@ export default function spindle(pi: ExtensionAPI) {
                         execSync(`tmux switch-client -t ${JSON.stringify(handle.session)}`, { stdio: "pipe" });
                         ctx.ui.notify(`Switched to ${handle.session}`, "info");
                     } catch {
-                        ctx.ui.notify(`Try: tmux attach -t ${handle.session}`, "error");
-                    }
-                } else {
-                    const terminal = process.env.TERMINAL || "xterm";
-                    try {
-                        nodeSpawn(terminal, ["-e", "tmux", "attach", "-t", handle.session], {
-                            detached: true, stdio: "ignore",
-                        }).unref();
-                        ctx.ui.notify(`Opening ${handle.session} in new terminal`, "info");
-                    } catch {
                         ctx.ui.notify(`Run: tmux attach -t ${handle.session}`, "info");
                     }
+                } else {
+                    ctx.ui.notify(`Run: tmux attach -t ${handle.session}`, "info");
                 }
             } else if (sub === "list") {
                 const subs = getActiveSubagents();
