@@ -74,6 +74,10 @@ export function renderDashboard(
                 : sf.currentTool;
             statusText = theme.fg("muted", tool);
             durationColor = "muted";
+        } else if (sf && sf.turns > 0) {
+            icon = theme.fg("warning", "⏳");
+            statusText = theme.fg("dim", `thinking… ${sf.turns} turn${sf.turns > 1 ? "s" : ""}, ${sf.toolCalls} tool${sf.toolCalls !== 1 ? "s" : ""}`);
+            durationColor = "muted";
         } else {
             icon = theme.fg("warning", "⏳");
             statusText = theme.fg("dim", "starting…");
