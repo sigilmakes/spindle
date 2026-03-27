@@ -3,7 +3,7 @@
  */
 
 import {
-    getActiveSubagents, readStatusFile, isTmuxPaneAlive,
+    getActiveSubagents, readStatusFile, isTmuxPaneAlive, killTmuxSession,
     type SubagentHandle, type AgentResult, type StatusFile,
 } from "./workers.js";
 
@@ -87,6 +87,7 @@ function pollOnce(): void {
             const result = buildResult(handle, sf);
             (handle as any)._resolve(result);
             pollerCallbacks?.onDone(handle, result);
+            killTmuxSession(handle.session);
             anyChanged = true;
         } else if ((handle as any).pastGrace && !isTmuxPaneAlive(handle.session)) {
             // Pi process is dead (session gone or fell back to shell)
@@ -98,6 +99,7 @@ function pollOnce(): void {
                 : crashResult(handle);
             (handle as any)._resolve(result);
             pollerCallbacks?.onDone(handle, result);
+            killTmuxSession(handle.session);
             anyChanged = true;
         }
     }

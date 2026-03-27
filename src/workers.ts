@@ -218,7 +218,7 @@ function isTmuxPaneAlive(session: string): boolean {
 const STATUS_DIR = ".spindle";
 const STATUS_FILE = "status.json";
 
-export { isTmuxPaneAlive };
+export { isTmuxPaneAlive, killTmuxSession };
 
 export function readStatusFile(dir: string): StatusFile | null {
     const filePath = path.join(dir, STATUS_DIR, STATUS_FILE);
