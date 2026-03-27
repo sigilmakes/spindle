@@ -83,7 +83,9 @@ function parseList(block: string, field: string): string[] {
 }
 
 export default function workerExtension(pi: ExtensionAPI) {
-    let cwd = process.cwd();
+    // Status dir can be overridden via env var (for non-worktree subagents
+    // that share a cwd and would clobber each other's status files).
+    let statusBaseDir = process.env.SPINDLE_STATUS_DIR || process.cwd();
     let status: StatusData = {
         status: "running",
         startTime: Date.now(),
@@ -94,7 +96,7 @@ export default function workerExtension(pi: ExtensionAPI) {
     };
 
     function writeStatus(): void {
-        const dir = path.join(cwd, STATUS_DIR);
+        const dir = path.join(statusBaseDir, STATUS_DIR);
         const file = path.join(dir, STATUS_FILE);
         try {
             fs.mkdirSync(dir, { recursive: true });
@@ -112,8 +114,7 @@ export default function workerExtension(pi: ExtensionAPI) {
         };
     });
 
-    pi.on("session_start", async (_event, ctx) => {
-        cwd = ctx.cwd;
+    pi.on("session_start", async (_event, _ctx) => {
         writeStatus();
     });
 

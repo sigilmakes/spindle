@@ -238,8 +238,11 @@ function buildPiCommand(
     opts: SubagentOptions,
     workerExtPath: string,
     cwd: string,
+    statusDir: string,
 ): string {
-    const args: string[] = ["pi", "-p", "--no-session"];
+    // SPINDLE_STATUS_DIR tells the worker extension where to write status.json
+    const envPrefix = `SPINDLE_STATUS_DIR=${JSON.stringify(statusDir)}`;
+    const args: string[] = [envPrefix, "pi", "-p", "--no-session"];
     args.push("-e", workerExtPath);
 
     const agents = discoverAgents(cwd);
@@ -383,7 +386,9 @@ export function subagent(
         statusDir = worktreeDir;
         agentCwd = worktreeDir;
     } else {
-        statusDir = defaultCwd;
+        // Each non-worktree subagent gets a unique status directory
+        // so multiple subagents sharing a cwd don't clobber each other's status files.
+        statusDir = fs.mkdtempSync(path.join(os.tmpdir(), `spindle-status-${id}-`));
         agentCwd = defaultCwd;
     }
 
@@ -393,6 +398,7 @@ export function subagent(
         { ...opts, model: opts.model ?? defaultModel },
         workerExtPath,
         agentCwd,
+        statusDir,
     );
 
     createTmuxSession(sessionName, agentCwd, command);
