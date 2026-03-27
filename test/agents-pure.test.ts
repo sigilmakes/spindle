@@ -3,7 +3,6 @@ import {
     setExtensionDir,
     getExtensionDir,
     resolveAgent,
-    killAllSubAgents,
     type AgentConfig,
 } from "../src/agents.js";
 
@@ -59,13 +58,5 @@ describe("resolveAgent", () => {
 
     it("returns undefined for empty agents list", () => {
         expect(resolveAgent([], "scout")).toBeUndefined();
-    });
-});
-
-// -- killAllSubAgents ---------------------------------------------------------
-
-describe("killAllSubAgents", () => {
-    it("does not throw when no active processes exist", () => {
-        expect(() => killAllSubAgents()).not.toThrow();
     });
 });
