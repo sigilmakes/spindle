@@ -104,29 +104,13 @@ export default function spindle(pi: ExtensionAPI) {
                             : `${(result.durationMs / 60000).toFixed(1)}m`;
 
                         const icon = result.ok ? "✓" : "✗";
-                        const parts = [
-                            `${icon} Subagent **${handle.id}** finished (${duration}).`,
-                        ];
-                        if (result.branch) parts[0] += ` Branch: \`${result.branch}\``;
-                        parts.push("", `**Status:** ${result.status}`);
-                        parts.push(`**Summary:** ${result.summary.slice(0, 500)}`);
-                        if (result.findings.length > 0) {
-                            parts.push("", "**Findings:**");
-                            for (const f of result.findings) parts.push(`- ${f}`);
-                        }
-                        if (result.artifacts.length > 0) {
-                            parts.push("", "**Artifacts:**");
-                            for (const a of result.artifacts) parts.push(`- ${a}`);
-                        }
-                        if (result.blockers.length > 0) {
-                            parts.push("", "**Blockers:**");
-                            for (const b of result.blockers) parts.push(`- ${b}`);
-                        }
-                        parts.push("", `Cost: $${result.cost.toFixed(4)} | Turns: ${result.turns} | Tools: ${result.toolCalls}`);
+                        let line = `${icon} **${handle.id}** finished (${duration}, ${result.status})`;
+                        if (result.branch) line += ` · \`${result.branch}\``;
+                        line += ` — $${result.cost.toFixed(2)}`;
 
                         pi.sendMessage({
                             customType: "spindle-subagent-done",
-                            content: parts.join("\n"),
+                            content: line,
                             display: true,
                             details: result,
                         }, {
