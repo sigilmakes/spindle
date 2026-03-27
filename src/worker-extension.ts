@@ -169,16 +169,22 @@ export default function workerExtension(pi: ExtensionAPI) {
 
         const episode = parseEpisodeBlock(lastText);
 
-        // Use episode summary if available, otherwise fall back to raw text
         let summary = episode?.summary || lastText;
         if (summary.length > 2000) {
             summary = summary.slice(0, 2000) + "...";
+        }
+
+        // Truncate raw text for status file (50KB max)
+        let text = lastText;
+        if (text.length > 50 * 1024) {
+            text = text.slice(0, 50 * 1024) + "\n[truncated]";
         }
 
         status.status = "done";
         status.exitCode = 0;
         status.endTime = Date.now();
         status.summary = summary;
+        (status as any).text = text;
         status.episode = episode || undefined;
         status.currentTool = undefined;
         status.currentArgs = undefined;

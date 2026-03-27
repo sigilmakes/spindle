@@ -1,88 +1,91 @@
-# Workers (Async Subagents)
+# Subagents
 
-Workers are async subagents that run in isolated git worktrees with their own tmux sessions.
+Async agents in tmux sessions with optional git worktree isolation.
 
-## spawn()
+## subagent()
 
 ```js
-h = spawn(task, opts?)
+h = subagent(task, opts?)
 ```
 
-Returns a `WorkerHandle` immediately. The worker runs in the background.
+Returns a `SubagentHandle` immediately. The subagent runs in its own tmux session.
 
 **Options:**
-- `agent` — name of a pre-defined agent (from `~/.pi/agent/agents/`)
+- `agent` — pre-defined agent (from `~/.pi/agent/agents/`)
 - `model` — model override
-- `tools` — tool whitelist (e.g. `["read", "grep", "find"]`)
+- `tools` — tool whitelist
 - `timeout` — kill after N ms
-- `worktree` — use git worktree (default: true)
+- `worktree` — `false` (default): same directory. `true`: isolated git worktree + branch.
 - `name` — display name
-- `systemPromptSuffix` — additional system prompt text
+- `systemPromptSuffix` — additional prompt text
 
-## WorkerHandle
+## SubagentHandle
 
 ```js
 h.id        // "w0"
-h.branch    // "spindle/w0"
-h.worktree  // ".worktrees/w0"
 h.session   // "spindle-w0" (tmux session name)
+h.branch    // "spindle/w0" (if worktree: true)
+h.worktree  // ".worktrees/w0" (if worktree: true)
 h.task      // original task
 h.status    // "running" | "done" | "crashed"
-h.result    // Promise<WorkerResult>
-h.cancel()  // kill the worker
+h.result    // Promise<AgentResult>
+h.cancel()  // kill the subagent
 ```
 
-## WorkerResult
+## AgentResult
 
 ```js
 {
-    status: "success" | "failure",
+    status: "success" | "failure" | "blocked",
     summary: "What the agent accomplished...",
     findings: ["Found X", "Implemented Y"],
     artifacts: ["src/auth.ts — rewritten", "src/jwt.ts — new"],
     blockers: [],
-    branch: "spindle/w0",
-    worktree: "/path/to/.worktrees/w0",
-    exitCode: 0,
-    turns: 8,
-    toolCalls: 23,
+    text: "Full raw output...",
+    ok: true,
     cost: 0.04,
     model: "claude-sonnet-4-20250514",
+    turns: 8,
+    toolCalls: 23,
     durationMs: 134000,
+    exitCode: 0,
+    branch: "spindle/w0",     // if worktree: true
+    worktree: ".worktrees/w0", // if worktree: true
 }
 ```
 
-The structured episode (summary, findings, artifacts, blockers) is parsed from the agent's final response by the worker extension. The agent writes an `<episode>` block at the end of its output — this is injected via the system prompt automatically.
+The episode fields (status, summary, findings, artifacts, blockers) are parsed from the agent's `<episode>` block, injected automatically by the worker extension.
 
 ## Patterns
+
+### Explore
+```js
+r = await subagent("find all auth-related code").result
+r.findings.forEach(f => console.log(f))
+```
 
 ### Parallel from data
 ```js
 files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))
-workers = files.map(f => spawn(`Review ${f}`, { agent: 'reviewer' }))
+workers = files.map(f => subagent(`Review ${f}`))
 results = await Promise.all(workers.map(w => w.result))
 ```
 
-### Merge successful workers
+### Implement and merge
 ```js
-for (const w of workers) {
-    const r = await w.result
-    if (r.status === "success") {
-        await bash({ command: `git merge ${w.branch}` })
-    }
-}
+h = subagent("refactor auth to use JWT", { worktree: true })
+r = await h.result
+if (r.ok) await bash({ command: `git merge ${r.branch}` })
 ```
 
 ### Fire and forget
 ```js
-spawn("Refactor auth module")
-spawn("Add parser tests")
-// Notifications arrive as each finishes
+subagent("refactor auth module", { worktree: true })
+subagent("add parser tests", { worktree: true })
+// notifications arrive as each finishes
 ```
 
 ### Attach to watch
 ```
 /spindle attach w0
 ```
-
-Opens the worker's tmux session — you see the full pi TUI with every tool call in real time.

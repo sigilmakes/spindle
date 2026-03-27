@@ -1,54 +1,51 @@
 ---
 name: spindle-repl
-description: Persistent JavaScript REPL for orchestration — async workers, file I/O, tool wrappers, MCP. Use when chaining operations, spawning parallel agents, or transforming data programmatically.
+description: Persistent JavaScript REPL for orchestration — async subagents in tmux sessions, file I/O, tool wrappers, MCP. Use when chaining operations, spawning parallel agents, or transforming data programmatically.
 ---
 
 # Spindle REPL
 
-Execute JavaScript in a persistent REPL via `spindle_exec`. State persists across calls — variables, handles, results survive between invocations.
+Execute JavaScript in a persistent REPL via `spindle_exec`. State persists across calls.
 
 ## When to use
 
-- **Spawn async workers** — `spawn()` for parallel work in isolated worktrees
-- **Chain operations** — grep → filter → map → spawn
+- **Spawn subagents** — `subagent()` for parallel/async work
+- **Chain operations** — grep → filter → map → subagent
 - **Transform data** — load files, parse, aggregate in JS
 - **Persist state** — variables survive across `spindle_exec` calls
 
 Use native tools (read, edit, bash) for single operations. Use the REPL when you need composition or state.
 
-## Core pattern
+## subagent()
 
 ```js
-// Discover → transform → act
-files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))
-workers = files.map(f => spawn(`Review ${f}`, { agent: 'reviewer' }))
-results = await Promise.all(workers.map(w => w.result))
+h = subagent(task, opts?)
 ```
 
-## Workers
-
-`spawn(task, opts?)` creates an async worker in a git worktree + tmux session. Returns a handle immediately.
+Spawns an async subagent in a tmux session. Returns a `SubagentHandle` immediately.
 
 ```js
-h = spawn("Refactor auth module")
-h.status    // "running" | "done" | "crashed"
-h.branch    // "spindle/w0"
-r = await h.result  // blocks until done
-await bash({ command: `git merge ${h.branch}` })
+// Explore (default — no worktree)
+r = await subagent("find all auth code in src/").result
+r.findings  // structured results from the subagent
+
+// Implement (worktree for isolation)
+h = subagent("refactor auth module", { worktree: true })
+// main agent keeps working...
+r = await h.result
+await bash({ command: `git merge ${r.branch}` })
 ```
 
-Options: `{ agent, model, tools, timeout, worktree, name }`
+**Options:** `{ agent, model, tools, timeout, worktree, name }`
 
-Workers are isolated. Each gets its own worktree and terminal. No shared state.
+- `worktree: false` (default) — works in same directory, good for exploration
+- `worktree: true` — gets its own git worktree + branch, required for writes
 
-## LLM one-shots
-
-`llm(prompt, opts?)` is blocking — no worktree, no tmux. For quick LLM calls.
-
-```js
-r = await llm("Summarize this code", { model: "haiku" })
-r.text  // the response
-r.ok    // true if successful
+**AgentResult** (from `await h.result`):
+```
+status, summary, findings[], artifacts[], blockers[],
+text, ok, cost, model, turns, toolCalls, durationMs, exitCode,
+branch?, worktree?
 ```
 
 ## Tool wrappers
@@ -57,11 +54,7 @@ All return `ToolResult { output, error, ok, exitCode }`. Never throw.
 
 ```js
 r = await grep({ pattern: "TODO", path: "src/" })
-r.output  // grep results
-r.ok      // true
-
 r = await bash({ command: "npm test" })
-r.exitCode  // 0 or non-zero
 ```
 
 ## File I/O
@@ -74,18 +67,11 @@ await save("output.json", JSON.stringify(data))
 
 ## Scoping
 
-`const`, `let`, `var`, and bare assignments all persist across calls.
-
-```js
-// Call 1:
-x = 42
-// Call 2:
-x  // → 42
-```
+`const`, `let`, `var`, and bare assignments persist across calls.
 
 ## Commands
 
-- `/spindle attach <id>` — open worker's tmux session
-- `/spindle list` — show active workers
+- `/spindle attach <id>` — open subagent's tmux session
+- `/spindle list` — show active subagents
 - `/spindle reset` — reset REPL state
-- `/spindle config subModel <model>` — set default worker model
+- `/spindle config subModel <model>` — default subagent model

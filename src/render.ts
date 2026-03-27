@@ -9,7 +9,7 @@ export interface SpindleExecDetails {
 
 export interface SpindleStatusDetails {
     variables: Array<{ name: string; type: string; preview: string }>;
-    usage: { totalCost: number; totalLlmCalls: number };
+    usage: { totalCost: number; totalSubagents: number };
     config: { subModel: string | undefined; outputLimit: number };
 }
 
@@ -72,7 +72,7 @@ export function formatStatusResult(details: SpindleStatusDetails, theme: Theme):
 
     // Usage
     parts.push(theme.fg("accent", "Usage:"));
-    parts.push(`  ${details.usage.totalLlmCalls} sub-agent calls, $${details.usage.totalCost.toFixed(4)}`);
+    parts.push(`  ${details.usage.totalSubagents} subagent calls, $${details.usage.totalCost.toFixed(4)}`);
 
     // Config
     parts.push("");

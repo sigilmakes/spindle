@@ -38,7 +38,7 @@ for (let i = 0; i < maxIterations && ideas.length > 0; i++) {
     console.log(`\n--- Experiment ${tried}: ${idea} ---`)
 
     // Implement the hypothesis
-    impl = await llm(`You are working in ${process.cwd()}.
+    impl = await subagent(`You are working in ${process.cwd()}.
 
 Current ${metricName}: ${baseline}
 Hypothesis: ${idea}
@@ -46,9 +46,9 @@ Hypothesis: ${idea}
 Make the change. Keep it minimal and reversible.
 Do NOT commit — we measure first.`, {
         name: `exp-${tried}`
-    })
+    }).result
 
-    if (impl.status !== "success") {
+    if (!impl.ok) {
         console.log(`❌ Implementation failed, skipping`)
         await bash({ command: "git checkout -- ." })
         continue
@@ -82,7 +82,7 @@ console.log(`${metricName}: ${baseline}`)
 Instead of a static list, generate hypotheses from a sub-agent:
 
 ```javascript
-ideaGen = await llm(`Analyze the codebase at ${dir}/ for ${metricName} optimization opportunities.
+ideaGen = await subagent(`Analyze the codebase at ${dir}/ for ${metricName} optimization opportunities.
 
 Current ${metricName}: ${baseline}
 Already tried: ${triedIdeas.join(", ") || "nothing yet"}
@@ -90,7 +90,7 @@ Already tried: ${triedIdeas.join(", ") || "nothing yet"}
 Suggest 5 specific, actionable optimizations. Each should be a single change.
 Put each idea as a finding.`, {
     name: "ideagen"
-})
+}).result
 
 ideas = ideaGen.findings
 ```

@@ -2,8 +2,6 @@
 
 ## Tools
 
-Spindle registers two pi tools:
-
 ### `spindle_exec`
 
 Execute JavaScript in a persistent REPL.
@@ -14,13 +12,13 @@ Execute JavaScript in a persistent REPL.
 
 ### `spindle_status`
 
-Show REPL variables, active workers, usage stats, and configuration. No parameters.
+Show REPL variables, active subagents, usage stats, and configuration. No parameters.
 
 ## REPL Builtins
 
 ### Tool wrappers
 
-All tool wrappers return `ToolResult { output: string, error: string, ok: boolean, exitCode: number }`. They never throw — errors are captured in the result.
+All return `ToolResult { output, error, ok, exitCode }`. Never throw.
 
 ```typescript
 read(args: { path: string; offset?: number; limit?: number }): Promise<ToolResult>
@@ -39,92 +37,65 @@ load(path: string): Promise<string | Map<string, string>>
 save(path: string, content: string): Promise<void>
 ```
 
-`load()` returns a string for files, a `Map<relativePath, content>` for directories. Bypasses the agent's context window.
-
-### Workers
+### subagent()
 
 ```typescript
-spawn(task: string, opts?: SpawnOptions): WorkerHandle
+subagent(task: string, opts?: SubagentOptions): SubagentHandle
 ```
 
-Spawns an async worker in a git worktree + tmux session. Returns immediately.
-
-**SpawnOptions:**
+**SubagentOptions:**
 ```typescript
 {
-    name?: string;           // Display name
-    agent?: string;          // Pre-defined agent name
-    model?: string;          // Model override
-    tools?: string[];        // Tool whitelist
-    timeout?: number;        // Kill after N ms
-    worktree?: boolean;      // Use git worktree (default: true)
-    systemPromptSuffix?: string;  // Additional system prompt
+    name?: string;
+    agent?: string;           // pre-defined agent name
+    model?: string;
+    tools?: string[];
+    timeout?: number;
+    worktree?: boolean;       // default: false
+    systemPromptSuffix?: string;
 }
 ```
 
-**WorkerHandle:**
+**SubagentHandle:**
 ```typescript
 {
-    id: string;              // "w0", "w1", ...
-    branch: string;          // "spindle/w0"
-    worktree: string;        // Absolute path to worktree
-    session: string;         // Tmux session name
-    task: string;            // Original task description
-    startTime: number;       // Timestamp
-    status: WorkerStatus;    // "running" | "done" | "crashed"
-    result: Promise<WorkerResult>;
+    id: string;               // "w0", "w1", ...
+    task: string;
+    session: string;          // tmux session name
+    startTime: number;
+    branch?: string;          // git branch (if worktree: true)
+    worktree?: string;        // worktree path (if worktree: true)
+    status: SubagentStatus;   // "running" | "done" | "crashed"
+    result: Promise<AgentResult>;
     cancel(): Promise<void>;
 }
 ```
 
-**WorkerResult:**
+**AgentResult:**
 ```typescript
 {
-    status: "success" | "failure";
+    // Episode (parsed from agent's <episode> block)
+    status: "success" | "failure" | "blocked";
     summary: string;
-    findings: string[];    // key findings or deliverables
-    artifacts: string[];   // files created or modified
-    blockers: string[];    // what's preventing progress (if blocked)
-    branch: string;
-    worktree: string;
-    exitCode: number;
+    findings: string[];
+    artifacts: string[];
+    blockers: string[];
+
+    // Raw output
+    text: string;
+    ok: boolean;
+
+    // Metadata
+    cost: number;
+    model: string;
     turns: number;
     toolCalls: number;
-    cost: number;
-    model: string;
     durationMs: number;
-}
-```
-
-### LLM
-
-```typescript
-llm(prompt: string, opts?: LlmOptions): Promise<LlmResult>
-```
-
-Blocking one-shot subagent. No worktree, no tmux — just spawns a pi process, waits for completion.
-
-**LlmOptions:**
-```typescript
-{
-    agent?: string;
-    model?: string;
-    tools?: string[];
-    timeout?: number;
-    maxOutput?: number | false;
-}
-```
-
-**LlmResult:**
-```typescript
-{
-    text: string;
-    cost: number;
-    model: string;
-    turns: number;
     exitCode: number;
-    error?: string;
-    ok: boolean;
+
+    // Worktree (undefined when worktree: false)
+    branch?: string;
+    worktree?: string;
 }
 ```
 
@@ -142,7 +113,7 @@ mcp_disconnect(server?: string): Promise<void>
 ```typescript
 sleep(ms: number): Promise<void>
 diff(a: string, b: string, opts?: { context?: number }): string
-retry<T>(fn: () => Promise<T>, opts?: { attempts?: number; delay?: number; backoff?: number }): Promise<T>
+retry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T>
 vars(): string[]
 clear(name?: string): string
 help(): string
@@ -150,34 +121,19 @@ help(): string
 
 ## Status File Protocol
 
-Workers write `.spindle/status.json` in their worktree:
-
-```json
-{
-    "status": "running",
-    "currentTool": "edit",
-    "currentArgs": "src/auth.ts",
-    "startTime": 1711540000000,
-    "turns": 3,
-    "toolCalls": 7,
-    "cost": 0.02,
-    "model": "claude-sonnet-4-20250514",
-    "lastUpdate": 1711540120000
-}
-```
-
-On completion:
+The worker extension writes `.spindle/status.json`:
 
 ```json
 {
     "status": "done",
     "exitCode": 0,
     "summary": "Refactored auth module...",
+    "text": "Full raw output...",
     "episode": {
         "status": "success",
-        "summary": "Refactored auth module to use JWT tokens...",
-        "findings": ["Replaced session-based auth with JWT", "Added token refresh endpoint"],
-        "artifacts": ["src/auth.ts — rewritten", "src/middleware/jwt.ts — new"],
+        "summary": "Refactored auth module to use JWT...",
+        "findings": ["Replaced session auth with JWT", "Added refresh endpoint"],
+        "artifacts": ["src/auth.ts", "src/middleware/jwt.ts"],
         "blockers": []
     },
     "startTime": 1711540000000,

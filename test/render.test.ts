@@ -86,21 +86,21 @@ describe("formatStatusResult", () => {
                 { name: "x", type: "number", preview: "42" },
                 { name: "data", type: "object", preview: "{a, b}" },
             ],
-            usage: { totalCost: 0.05, totalLlmCalls: 3 },
+            usage: { totalCost: 0.05, totalSubagents: 3 },
             config: { subModel: "haiku", outputLimit: 8192 },
         };
         const text = formatStatusResult(details, theme);
         expect(text).toContain("x");
         expect(text).toContain("42");
         expect(text).toContain("data");
-        expect(text).toContain("3 sub-agent calls");
+        expect(text).toContain("3 subagent calls");
         expect(text).toContain("haiku");
     });
 
     it("formats status with no variables", () => {
         const details: SpindleStatusDetails = {
             variables: [],
-            usage: { totalCost: 0, totalLlmCalls: 0 },
+            usage: { totalCost: 0, totalSubagents: 0 },
             config: { subModel: undefined, outputLimit: 8192 },
         };
         const text = formatStatusResult(details, theme);

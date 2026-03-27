@@ -32,7 +32,7 @@ for (const task of tasks) {
     // === Inner loop: implement/review ===
     for (let attempt = 0; attempt < maxReviewAttempts; attempt++) {
         // Implement
-        impl = await llm(`You are working in ${process.cwd()}.
+        impl = await subagent(`You are working in ${process.cwd()}.
 
 Task: ${task.description}
 ${feedback ? `\nPrevious review feedback — address these issues:\n${feedback}` : ""}
@@ -41,7 +41,7 @@ ${progress ? `\nWork completed so far in this plan:\n${progress}` : ""}
 Implement this task. Run relevant tests to verify your changes work.
 Make exactly one commit when done.`, {
             name: `impl-${task.id}-${attempt}`
-        })
+        }).result
 
         if (!impl.ok) {
             console.log(`❌ Implementation failed`)
@@ -50,7 +50,7 @@ Make exactly one commit when done.`, {
         }
 
         // Review
-        review = await llm(`Review the most recent git changes for this task: "${task.description}"
+        review = await subagent(`Review the most recent git changes for this task: "${task.description}"
 
 Run \`git diff ${checkpoint}\` to see the changes. Also run tests.
 
@@ -64,7 +64,7 @@ If you would merge this as-is, say APPROVED.
 If changes are needed, say REJECTED and list specific, actionable issues.
 Do not rubber-stamp. Be rigorous.`, {
             name: `review-${task.id}-${attempt}`
-        })
+        }).result
 
         if (review.text.includes("APPROVED")) {
             approved = true
@@ -113,7 +113,7 @@ The template saves a git ref (`checkpoint`) before each task and uses `git reset
 
 ## Parallelism
 
-The review cycle makes parallelism harder because each task's implement/review loop is stateful. Use `spawn()` with worktrees only for truly independent tasks. Sequential is the right default for this pattern.
+The review cycle makes parallelism harder because each task's implement/review loop is stateful. Use `subagent()` with worktrees only for truly independent tasks. Sequential is the right default for this pattern.
 
 ## Gotchas
 

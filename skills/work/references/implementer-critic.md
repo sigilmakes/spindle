@@ -23,14 +23,14 @@ checkpoint = (await bash({ command: "git rev-parse HEAD" })).output.trim()
 // === Loop ===
 for (let attempt = 0; attempt < maxAttempts; attempt++) {
     // Implement
-    impl = await llm(`You are working in ${process.cwd()}.
+    impl = await subagent(`You are working in ${process.cwd()}.
 
 Goal: ${goal}
 ${feedback ? `\nPrevious review feedback — address ALL of these:\n${feedback}` : ""}
 
 Implement this. Run tests. Make exactly one commit when done.`, {
         name: `impl-${attempt}`
-    })
+    }).result
 
     if (!impl.ok) {
         console.log(`❌ Implementation failed`)
@@ -39,7 +39,7 @@ Implement this. Run tests. Make exactly one commit when done.`, {
     }
 
     // Review
-    review = await llm(`Review the most recent git changes.
+    review = await subagent(`Review the most recent git changes.
 
 Goal was: ${goal}
 
@@ -54,7 +54,7 @@ Evaluate:
 If you would merge this as-is, say APPROVED.
 If it needs work, say REJECTED and list every specific issue.`, {
         name: `review-${attempt}`
-    })
+    }).result
 
     if (review.text.includes("APPROVED")) {
         console.log(`✅ Approved after ${attempt + 1} attempt(s)`)

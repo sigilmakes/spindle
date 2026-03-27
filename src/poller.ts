@@ -1,45 +1,23 @@
 /**
- * Status Poller — polls worker status files and drives dashboard + notifications.
- *
- * Reads .spindle/status.json from each active worker's worktree every 2s.
- * Detects state changes and fires callbacks for dashboard updates and
- * completion notifications.
+ * Status Poller — polls subagent status files and drives dashboard + notifications.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { execSync } from "node:child_process";
 import {
-    getActiveWorkers,
-    type WorkerHandle,
-    type WorkerResult,
-    type WorkerStatusFile,
+    getActiveSubagents, readStatusFile,
+    type SubagentHandle, type AgentResult, type StatusFile,
 } from "./workers.js";
 
 const POLL_INTERVAL_MS = 2000;
-const STATUS_DIR = ".spindle";
-const STATUS_FILE = "status.json";
 
 export interface PollerCallbacks {
-    onUpdate: (workers: Map<string, WorkerHandle>) => void;
-    onWorkerDone: (handle: WorkerHandle, result: WorkerResult) => void;
+    onUpdate: (subagents: Map<string, SubagentHandle>) => void;
+    onDone: (handle: SubagentHandle, result: AgentResult) => void;
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let pollerCallbacks: PollerCallbacks | null = null;
-
-/** Cache of last-seen status per worker to detect changes. */
 const lastStatus = new Map<string, string>();
-
-function readStatusFile(worktreeDir: string): WorkerStatusFile | null {
-    const filePath = path.join(worktreeDir, STATUS_DIR, STATUS_FILE);
-    try {
-        const raw = fs.readFileSync(filePath, "utf-8");
-        return JSON.parse(raw) as WorkerStatusFile;
-    } catch {
-        return null;
-    }
-}
 
 function tmuxSessionExists(session: string): boolean {
     try {
@@ -50,41 +28,63 @@ function tmuxSessionExists(session: string): boolean {
     }
 }
 
-function buildResult(handle: WorkerHandle, sf: WorkerStatusFile): WorkerResult {
-    const episode = sf.episode;
+function buildResult(handle: SubagentHandle, sf: StatusFile): AgentResult {
+    const ep = sf.episode;
     return {
-        status: episode?.status === "success" ? "success"
-            : episode?.status === "blocked" ? "failure"
+        status: ep?.status === "success" ? "success"
+            : ep?.status === "blocked" ? "blocked"
             : sf.exitCode === 0 ? "success" : "failure",
-        summary: episode?.summary || sf.summary || "",
-        findings: episode?.findings || [],
-        artifacts: episode?.artifacts || [],
-        blockers: episode?.blockers || [],
-        branch: handle.branch,
-        worktree: handle.worktree,
-        exitCode: sf.exitCode ?? -1,
-        turns: sf.turns,
-        toolCalls: sf.toolCalls,
+        summary: ep?.summary || sf.summary || "",
+        findings: ep?.findings || [],
+        artifacts: ep?.artifacts || [],
+        blockers: ep?.blockers || [],
+        text: sf.text || sf.summary || "",
+        ok: (ep?.status || (sf.exitCode === 0 ? "success" : "failure")) === "success",
         cost: sf.cost,
         model: sf.model || "unknown",
+        turns: sf.turns,
+        toolCalls: sf.toolCalls,
         durationMs: (sf.endTime || Date.now()) - sf.startTime,
+        exitCode: sf.exitCode ?? -1,
+        branch: handle.branch,
+        worktree: handle.worktree,
+    };
+}
+
+function crashResult(handle: SubagentHandle): AgentResult {
+    return {
+        status: "failure",
+        summary: "Subagent process died without writing status",
+        findings: [],
+        artifacts: [],
+        blockers: [],
+        text: "",
+        ok: false,
+        cost: 0,
+        model: "unknown",
+        turns: 0,
+        toolCalls: 0,
+        durationMs: Date.now() - handle.startTime,
+        exitCode: -1,
+        branch: handle.branch,
+        worktree: handle.worktree,
     };
 }
 
 function pollOnce(): void {
-    const workers = getActiveWorkers();
-    if (workers.size === 0) {
+    const subagents = getActiveSubagents();
+    if (subagents.size === 0) {
         stopPoller();
         return;
     }
 
     let anyChanged = false;
 
-    for (const [id, handle] of workers) {
-        // Skip already resolved workers
+    for (const [id, handle] of subagents) {
         if ((handle as any).resolved) continue;
 
-        const sf = readStatusFile(handle.worktree);
+        const statusDir = (handle as any).statusDir as string;
+        const sf = readStatusFile(statusDir);
         const statusKey = sf ? `${sf.status}:${sf.lastUpdate}:${sf.currentTool}` : "null";
         const prevKey = lastStatus.get(id);
 
@@ -96,53 +96,34 @@ function pollOnce(): void {
         if (sf && (sf.status === "done" || sf.status === "crashed")) {
             const result = buildResult(handle, sf);
             (handle as any)._resolve(result);
-            pollerCallbacks?.onWorkerDone(handle, result);
+            pollerCallbacks?.onDone(handle, result);
             anyChanged = true;
         } else if (!sf && !tmuxSessionExists(handle.session)) {
-            // No status file and tmux session is dead — crashed before writing status
-            const result: WorkerResult = {
-                status: "failure",
-                summary: "Worker process died without writing status",
-                findings: [],
-                artifacts: [],
-                blockers: [],
-                branch: handle.branch,
-                worktree: handle.worktree,
-                exitCode: -1,
-                turns: 0,
-                toolCalls: 0,
-                cost: 0,
-                model: "unknown",
-                durationMs: Date.now() - handle.startTime,
-            };
+            const result = crashResult(handle);
             (handle as any)._resolve(result);
-            pollerCallbacks?.onWorkerDone(handle, result);
+            pollerCallbacks?.onDone(handle, result);
             anyChanged = true;
         }
     }
 
     if (anyChanged) {
-        pollerCallbacks?.onUpdate(workers);
+        pollerCallbacks?.onUpdate(subagents);
     }
 
-    // If all workers are resolved, stop polling
+    // Stop polling when all resolved
     let allDone = true;
-    for (const handle of workers.values()) {
-        if (!(handle as any).resolved) {
-            allDone = false;
-            break;
-        }
+    for (const handle of subagents.values()) {
+        if (!(handle as any).resolved) { allDone = false; break; }
     }
     if (allDone) {
-        // Emit one final update, then stop after a delay
-        pollerCallbacks?.onUpdate(workers);
+        pollerCallbacks?.onUpdate(subagents);
         setTimeout(() => {
-            const currentWorkers = getActiveWorkers();
-            let stillAllDone = true;
-            for (const h of currentWorkers.values()) {
-                if (!(h as any).resolved) { stillAllDone = false; break; }
+            const current = getActiveSubagents();
+            let stillDone = true;
+            for (const h of current.values()) {
+                if (!(h as any).resolved) { stillDone = false; break; }
             }
-            if (stillAllDone) stopPoller();
+            if (stillDone) stopPoller();
         }, 5000);
     }
 }
@@ -151,7 +132,6 @@ export function startPoller(cb: PollerCallbacks): void {
     pollerCallbacks = cb;
     if (!pollTimer) {
         pollTimer = setInterval(pollOnce, POLL_INTERVAL_MS);
-        // Run immediately on start
         pollOnce();
     }
 }

@@ -26,7 +26,7 @@ for (const task of tasks) {
     // Save checkpoint for clean revert
     checkpoint = (await bash({ command: "git rev-parse HEAD" })).output.trim()
 
-    ep = await llm(`You are working in ${process.cwd()}.
+    ep = await subagent(`You are working in ${process.cwd()}.
 
 Task: ${task.description}
 
@@ -35,7 +35,7 @@ ${progress}
 
 Implement this task. Run relevant tests. Commit when done.`, {
         name: `task-${task.id}`,
-    })
+    }).result
 
     if (ep.ok) {
         progress += `\n- ${task.description}: ${ep.text.slice(0, 200)}`
@@ -67,11 +67,11 @@ The task file is the source of truth for what's done — it survives crashes.
 
 ## Parallelism
 
-For independent tasks — different files, no shared state — use `spawn()` to run them in parallel on separate worktrees:
+For independent tasks — different files, no shared state — use `subagent()` with worktrees to run them in parallel:
 
 ```javascript
 independent = tasks.filter(t => !t.done && t.parallel)
-workers = independent.map(t => spawn(`Task: ${t.description}`, { name: `task-${t.id}` }))
+workers = independent.map(t => subagent(`Task: ${t.description}`, { name: `task-${t.id}`, worktree: true }))
 results = await Promise.all(workers.map(w => w.result))
 
 // Merge successful ones

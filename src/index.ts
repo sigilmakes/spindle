@@ -1,22 +1,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import { execSync, spawn as nodeSpawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { AgentToolUpdateCallback, ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { Message } from "@mariozechner/pi-ai";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
 import { createDiff, retry, createContextTools } from "./builtins.js";
-import { setExtensionDir, discoverAgents, resolveAgent, getExtensionDir } from "./agents.js";
+import { setExtensionDir } from "./agents.js";
 import { mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup } from "./mcp.js";
 import {
-    spawn as workerSpawn, killAllWorkers, getActiveWorkers, getWorker,
-    setWorkerCallbacks, resetWorkerCounter,
-    type WorkerHandle, type WorkerResult, type SpawnOptions,
+    subagent, killAllSubagents, getActiveSubagents, getSubagent,
+    type SubagentHandle, type AgentResult, type SubagentOptions,
 } from "./workers.js";
 import { startPoller, stopPoller } from "./poller.js";
 import { renderDashboard } from "./dashboard.js";
@@ -25,75 +22,39 @@ import {
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
 
-// Register the extension directory so workers can find the worker extension.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 setExtensionDir(__dirname);
 
 export default function spindle(pi: ExtensionAPI) {
-    /** Names of all injected builtins — used by vars()/clear() to exclude from user variables. */
     const BUILTIN_NAMES = new Set([
-        // vm context primitives
         "console", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
         "Promise", "URL", "TextEncoder", "TextDecoder",
-        // tool wrappers
         "read", "bash", "grep", "find", "edit", "write", "ls",
-        // file I/O
         "load", "save",
-        // orchestration
-        "spawn", "llm",
-        // MCP
+        "subagent",
         "mcp", "mcp_call", "mcp_connect", "mcp_disconnect",
-        // utilities
         "sleep", "diff", "retry", "vars", "clear", "help",
     ]);
 
     let repl: Repl | null = null;
     let cwd = process.cwd();
     let subModel: string | undefined;
-    let sessionFile: string | undefined;
 
-    const cumulativeUsage = { totalCost: 0, totalLlmCalls: 0 };
+    const cumulativeUsage = { totalCost: 0, totalSubagents: 0 };
 
-    // Per-exec state
-    let currentOnUpdate: AgentToolUpdateCallback<SpindleExecDetails> | undefined;
     let currentSignal: AbortSignal | undefined;
-    let currentCode = "";
 
-    // Dashboard management
-    let dashboardVisible = false;
+    // Dashboard
+    let setWidget: ((lines: string[] | undefined) => void) | null = null;
 
     function updateDashboard(): void {
-        const workers = getActiveWorkers();
-        if (workers.size === 0) {
-            if (dashboardVisible) {
-                try {
-                    // Clear widget after brief delay so user sees final state
-                    setTimeout(() => {
-                        const current = getActiveWorkers();
-                        const allDone = [...current.values()].every((h: any) => h.resolved);
-                        if (allDone && dashboardVisible) {
-                            // Keep showing for a bit then clear
-                        }
-                    }, 3000);
-                } catch { /* ignore */ }
-            }
+        const subs = getActiveSubagents();
+        if (subs.size === 0) {
+            setWidget?.(undefined);
             return;
         }
-        const lines = renderDashboard(workers);
-        if (lines.length > 0) {
-            try {
-                (globalThis as any).__spindle_setWidget?.(lines);
-            } catch { /* pi might be shutting down */ }
-            dashboardVisible = true;
-        }
-    }
-
-    function clearDashboard(): void {
-        try {
-            (globalThis as any).__spindle_clearWidget?.();
-        } catch { /* ignore */ }
-        dashboardVisible = false;
+        setWidget?.(renderDashboard(subs));
     }
 
     function initRepl(workingDir: string): Repl {
@@ -105,31 +66,28 @@ export default function spindle(pi: ExtensionAPI) {
         const fileIO = createFileIO(cwd);
         r.inject({ load: fileIO.load, save: fileIO.save });
 
-        // --- spawn() — async worker in tmux session ---
+        // --- subagent() ---
         r.inject({
-            spawn: (task: string, opts?: SpawnOptions) => {
-                const handle = workerSpawn(task, opts || {}, cwd, subModel);
+            subagent: (task: string, opts?: SubagentOptions) => {
+                const handle = subagent(task, opts || {}, cwd, subModel);
 
-                // Start the poller if not already running
                 startPoller({
                     onUpdate: () => updateDashboard(),
-                    onWorkerDone: (handle: WorkerHandle, result: WorkerResult) => {
+                    onDone: (handle: SubagentHandle, result: AgentResult) => {
                         cumulativeUsage.totalCost += result.cost;
-                        cumulativeUsage.totalLlmCalls++;
+                        cumulativeUsage.totalSubagents++;
 
                         const duration = result.durationMs < 60000
                             ? `${(result.durationMs / 1000).toFixed(0)}s`
                             : `${(result.durationMs / 60000).toFixed(1)}m`;
 
-                        const icon = result.status === "success" ? "✓" : "✗";
-
-                        // Build structured content for the agent
+                        const icon = result.ok ? "✓" : "✗";
                         const parts = [
-                            `${icon} Worker **${handle.id}** finished (${duration}). Branch: \`${handle.branch}\``,
-                            "",
-                            `**Status:** ${result.status}`,
-                            `**Summary:** ${result.summary.slice(0, 500)}`,
+                            `${icon} Subagent **${handle.id}** finished (${duration}).`,
                         ];
+                        if (result.branch) parts[0] += ` Branch: \`${result.branch}\``;
+                        parts.push("", `**Status:** ${result.status}`);
+                        parts.push(`**Summary:** ${result.summary.slice(0, 500)}`);
                         if (result.findings.length > 0) {
                             parts.push("", "**Findings:**");
                             for (const f of result.findings) parts.push(`- ${f}`);
@@ -145,7 +103,7 @@ export default function spindle(pi: ExtensionAPI) {
                         parts.push("", `Cost: $${result.cost.toFixed(4)} | Turns: ${result.turns} | Tools: ${result.toolCalls}`);
 
                         pi.sendMessage({
-                            customType: "spindle-worker-done",
+                            customType: "spindle-subagent-done",
                             content: parts.join("\n"),
                             display: true,
                             details: result,
@@ -163,154 +121,11 @@ export default function spindle(pi: ExtensionAPI) {
             },
         });
 
-        // --- llm() — blocking one-shot subagent (no tmux, no worktree) ---
-        r.inject({
-            llm: async (prompt: string, opts?: {
-                agent?: string; model?: string; tools?: string[];
-                timeout?: number; maxOutput?: number | false;
-            }) => {
-                const agents = discoverAgents(cwd);
-                const agentConfig = opts?.agent ? resolveAgent(agents, opts.agent) : undefined;
-
-                const args: string[] = ["--mode", "json", "-p", "--no-session"];
-
-                const model = opts?.model ?? agentConfig?.model ?? subModel;
-                if (model) args.push("--model", model);
-
-                const tools = opts?.tools ?? agentConfig?.tools;
-                if (tools?.length) args.push("--tools", tools.join(","));
-
-                // System prompt
-                let tmpDir: string | null = null;
-                let tmpFile: string | null = null;
-                if (agentConfig?.systemPrompt?.trim()) {
-                    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-llm-"));
-                    tmpFile = path.join(tmpDir, "prompt.md");
-                    fs.writeFileSync(tmpFile, agentConfig.systemPrompt, { encoding: "utf-8", mode: 0o600 });
-                    args.push("--append-system-prompt", tmpFile);
-                }
-
-                args.push(`Task: ${prompt}`);
-
-                const result = await new Promise<{
-                    text: string; cost: number; model: string;
-                    turns: number; exitCode: number; error?: string;
-                }>((resolve) => {
-                    const proc = nodeSpawn("pi", args, {
-                        cwd,
-                        shell: false,
-                        stdio: ["ignore", "pipe", "pipe"],
-                    });
-
-                    let buffer = "";
-                    let stderr = "";
-                    let lastText = "";
-                    let totalCost = 0;
-                    let processModel = "";
-                    let turns = 0;
-                    let errorMessage: string | undefined;
-
-                    const processLine = (line: string) => {
-                        if (!line.trim()) return;
-                        let event: Record<string, unknown>;
-                        try { event = JSON.parse(line); } catch { return; }
-
-                        if (event.type === "message_end" && event.message) {
-                            const msg = event.message as Message;
-                            if (msg.role === "assistant") {
-                                turns++;
-                                const u = msg.usage as any;
-                                if (u) totalCost += u.cost?.total || 0;
-                                if (!processModel && msg.model) processModel = msg.model as string;
-                                if ((msg as any).errorMessage) errorMessage = (msg as any).errorMessage;
-                                for (const part of msg.content) {
-                                    if (part.type === "text") lastText = part.text;
-                                }
-                            }
-                        }
-                    };
-
-                    proc.stdout!.on("data", (data: Buffer) => {
-                        buffer += data.toString();
-                        const lines = buffer.split("\n");
-                        buffer = lines.pop() || "";
-                        for (const line of lines) processLine(line);
-                    });
-
-                    proc.stderr!.on("data", (data: Buffer) => { stderr += data.toString(); });
-
-                    proc.on("close", (code) => {
-                        if (buffer.trim()) processLine(buffer);
-                        resolve({
-                            text: lastText,
-                            cost: totalCost,
-                            model: processModel || "unknown",
-                            turns,
-                            exitCode: code ?? 1,
-                            error: errorMessage || (code !== 0 ? stderr : undefined),
-                        });
-                    });
-
-                    proc.on("error", () => {
-                        resolve({ text: "", cost: 0, model: "unknown", turns: 0, exitCode: 1, error: "Failed to spawn pi" });
-                    });
-
-                    if (opts?.timeout) {
-                        setTimeout(() => {
-                            if (!proc.killed) {
-                                proc.kill("SIGTERM");
-                                setTimeout(() => { if (!proc.killed) proc.kill("SIGKILL"); }, 5000);
-                            }
-                        }, opts.timeout);
-                    }
-
-                    if (currentSignal) {
-                        const signal = currentSignal;
-                        const kill = () => {
-                            proc.kill("SIGTERM");
-                            setTimeout(() => { if (!proc.killed) proc.kill("SIGKILL"); }, 5000);
-                        };
-                        if (signal.aborted) kill();
-                        else signal.addEventListener("abort", kill, { once: true });
-                    }
-                });
-
-                // Cleanup temp files
-                if (tmpFile) try { fs.unlinkSync(tmpFile); } catch {}
-                if (tmpDir) try { fs.rmdirSync(tmpDir); } catch {}
-
-                cumulativeUsage.totalCost += result.cost;
-                cumulativeUsage.totalLlmCalls++;
-
-                // Apply maxOutput truncation
-                let text = result.text;
-                const max = opts?.maxOutput;
-                if (max !== undefined && max !== false && Number.isFinite(max) && text.length > max) {
-                    const limit = Math.max(max, 1024);
-                    const headSize = Math.floor(limit * 0.7);
-                    const tailSize = limit - headSize;
-                    text = text.slice(0, headSize) +
-                        `\n\n... [truncated: ${text.length} total chars] ...\n\n` +
-                        text.slice(-tailSize);
-                }
-
-                return {
-                    text,
-                    cost: result.cost,
-                    model: result.model,
-                    turns: result.turns,
-                    exitCode: result.exitCode,
-                    error: result.error,
-                    ok: result.exitCode === 0,
-                };
-            },
-        });
-
         r.inject({
             sleep: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)),
         });
 
-        // --- MCP builtins ---
+        // MCP
         r.inject({
             mcp: mcpList,
             mcp_call: mcpCall,
@@ -318,64 +133,58 @@ export default function spindle(pi: ExtensionAPI) {
             mcp_disconnect: mcpDisconnect,
         });
 
-        // --- Utility builtins: diff, retry, vars, clear ---
+        // Utilities
         r.inject({ diff: createDiff(cwd), retry });
-
         const ctxTools = createContextTools(r, BUILTIN_NAMES);
         r.inject({ vars: ctxTools.vars, clear: ctxTools.clear });
 
-        // --- help() ---
+        // help()
         r.inject({
             help: () => [
                 "=== Spindle REPL ===",
                 "",
                 "Tools (return ToolResult { output, error, ok, exitCode }):",
                 "  read({ path })              Read a file",
-                "  edit({ path, oldText, newText })  Replace exact text in a file",
-                "  write({ path, content })    Create or overwrite a file",
-                "  bash({ command, timeout? }) Run a shell command",
+                "  edit({ path, oldText, newText })  Replace exact text",
+                "  write({ path, content })    Create or overwrite",
+                "  bash({ command, timeout? }) Run shell command",
                 "  grep({ pattern, path })     Search with ripgrep",
                 "  find({ pattern, path })     Find files by glob",
-                "  ls({ path })                List directory contents",
+                "  ls({ path })                List directory",
                 "",
                 "File I/O (bypasses context window):",
-                "  load(path)                  File → string, directory → Map<path, content>",
+                "  load(path)                  File → string, directory → Map",
                 "  save(path, content)         Write without entering context",
                 "",
-                "Workers (async subagents in tmux sessions):",
-                "  spawn(task, opts?)          Spawn worker → WorkerHandle (returns immediately)",
+                "Subagents (async, in tmux sessions):",
+                "  subagent(task, opts?)       Spawn subagent → SubagentHandle",
                 "  h.status                    'running' | 'done' | 'crashed'",
-                "  h.result                    Promise<WorkerResult> — await when ready",
-                "  h.branch                    Git branch name (e.g. 'spindle/w0')",
-                "  h.cancel()                  Kill the worker",
+                "  h.result                    Promise<AgentResult>",
+                "  h.branch                    Git branch (if worktree: true)",
+                "  h.cancel()                  Kill the subagent",
+                "",
                 "  opts: { agent, model, tools, timeout, worktree, name }",
+                "  AgentResult: { status, summary, findings[], artifacts[],",
+                "    blockers[], text, ok, cost, model, turns, toolCalls,",
+                "    durationMs, exitCode, branch?, worktree? }",
                 "",
-                "LLM (blocking one-shot, no tmux):",
-                "  llm(prompt, opts?)          → { text, cost, model, turns, ok }",
-                "  opts: { agent, model, tools, timeout, maxOutput }",
-                "",
-                "MCP (Model Context Protocol):",
+                "MCP:",
                 "  mcp()                       List MCP servers",
                 "  mcp('server')               List tools for a server",
-                "  mcp_call(server, tool, args) One-shot tool call → ToolResult",
-                "  mcp_connect(server)         Persistent proxy → ServerProxy",
-                "  mcp_disconnect(server?)     Close MCP connections",
+                "  mcp_call(server, tool, args) One-shot tool call",
+                "  mcp_connect(server)         Persistent proxy",
+                "  mcp_disconnect(server?)     Close connections",
                 "",
                 "Utilities:",
-                "  sleep(ms)                   Async delay",
-                "  diff(a, b, opts?)           Unified diff (files or strings)",
-                "  retry(fn, opts?)            Exponential backoff (attempts, delay, backoff)",
-                "  vars()                      List persistent REPL variables",
-                "  clear(name?)                Free a variable",
-                "  help()                      This message",
+                "  sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(), help()",
                 "",
                 "Commands:",
-                "  /spindle attach <id>        Open worker's tmux session",
-                "  /spindle list               Show active workers",
+                "  /spindle attach <id>        Open subagent's tmux session",
+                "  /spindle list               Show active subagents",
                 "  /spindle reset              Reset REPL state",
-                "  /spindle config subModel <m> Set default worker model",
+                "  /spindle config subModel <m> Set default subagent model",
                 "",
-                "Scoping: const, let, var, and bare assignments all persist across calls.",
+                "Scoping: const, let, var, and bare assignments persist across calls.",
             ].join("\n"),
         });
 
@@ -384,17 +193,12 @@ export default function spindle(pi: ExtensionAPI) {
 
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
-        sessionFile = ctx.sessionManager.getSessionFile();
 
-        // Wire up dashboard widget
-        (globalThis as any).__spindle_setWidget = (lines: string[]) => {
-            try { ctx.ui.setWidget("spindle-workers", lines); } catch { /* ignore */ }
-        };
-        (globalThis as any).__spindle_clearWidget = () => {
-            try { ctx.ui.setWidget("spindle-workers", undefined); } catch { /* ignore */ }
+        setWidget = (lines) => {
+            try { ctx.ui.setWidget("spindle-subagents", lines as any); } catch {}
         };
 
-        // Restore config from session
+        // Restore config
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
             const entry = entries[i] as any;
@@ -407,63 +211,57 @@ export default function spindle(pi: ExtensionAPI) {
     });
 
     pi.on("session_shutdown", async () => {
-        killAllWorkers();
+        killAllSubagents();
         stopPoller();
-        clearDashboard();
-        (globalThis as any).__spindle_setWidget = undefined;
-        (globalThis as any).__spindle_clearWidget = undefined;
+        setWidget?.(undefined);
+        setWidget = null;
         await mcpCleanup();
         repl = null;
     });
 
+    // --- spindle_exec ---
+
     pi.registerTool({
         name: "spindle_exec",
         label: "Spindle",
-        description: "Execute JavaScript in a persistent REPL with built-in tools, async workers, and MCP integration.",
+        description: "Execute JavaScript in a persistent REPL with built-in tools, async subagents, and MCP.",
         parameters: Type.Object({
             code: Type.String({ description: "JavaScript code to execute" }),
         }),
         promptGuidelines: [
             [
-                "Use spindle_exec when you need to chain operations, transform data in JS, spawn async workers, or persist state across calls.",
-                "Use native tools (read, edit, write, bash, etc.) for single straightforward operations.",
+                "Use spindle_exec when you need to chain operations, transform data, spawn subagents, or persist state.",
+                "Use native tools (read, edit, write, bash) for single straightforward operations.",
                 "",
-                "Inside spindle_exec, think in JavaScript, not bash. Use grep/find/load builtins to get data, then JS to transform it.",
-                "  ✗ bash({command: \"find src -name '*.ts' | xargs grep 'export' | awk ...\"})  ← shell for data extraction",
-                "  ✓ hits = await grep({pattern: 'export class', path: 'src/'})                  ← builtin + JS filtering",
-                "  ✓ src = await load('src/'); [...src.entries()].filter(...)                     ← load + transform",
-                "bash() is for builds, tests, git — tools that DO things. Not for searching or data extraction.",
+                "Think in JavaScript, not bash:",
+                "  ✗ bash({command: \"find src -name '*.ts' | xargs grep 'export'\"})  ← shell for data",
+                "  ✓ hits = await grep({pattern: 'export class', path: 'src/'})       ← builtin + JS",
                 "",
-                "Async workers (spawn subagents in isolated git worktrees with tmux sessions):",
-                "  h = spawn('refactor auth module', { worktree: true })",
+                "Subagents (async, in tmux sessions):",
+                "  h = subagent('refactor auth module', { worktree: true })",
                 "  // returns immediately — main agent keeps working",
-                "  // later:",
-                "  r = await h.result   // blocks until worker finishes",
-                "  await bash({ command: `git merge ${h.branch}` })  // merge the work",
+                "  r = await h.result   // AgentResult with episode data",
+                "  r.findings, r.artifacts, r.blockers, r.summary, r.status",
+                "  await bash({ command: `git merge ${r.branch}` })",
                 "",
-                "  // Spawn multiple from data:",
+                "  // Explore without worktree:",
+                "  r = await subagent('find all auth code').result",
+                "  r.findings  // what the subagent found",
+                "",
+                "  // From data:",
                 "  files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))",
-                "  workers = files.map(f => spawn(`Review ${f}`, { name: f }))",
+                "  workers = files.map(f => subagent(`Review ${f}`))",
                 "  results = await Promise.all(workers.map(w => w.result))",
                 "",
-                "LLM one-shots (blocking, no worktree):",
-                "  r = await llm('Summarize this code', { model: 'haiku' })",
-                "  // r.text, r.cost, r.ok",
+                "const/let/var and bare assignments persist across calls.",
                 "",
-                "const, let, var, and bare assignments all persist across calls.",
-                "",
-                "Search: grep({pattern,path}), find({pattern,path}), ls({path})",
-                "Files: read({path}), edit({path,oldText,newText}), write({path,content})",
-                "I/O: load(path) → string|Map, save(path, content)",
-                "Shell: bash({command}) — for builds/tests/git only",
-                "Workers: spawn(task, opts?) → WorkerHandle { id, branch, status, result, cancel() }",
-                "LLM: llm(prompt, opts?) → { text, cost, model, turns, ok }",
-                "MCP: mcp(server?) → list, mcp_call(server, tool, args), mcp_connect(server), mcp_disconnect()",
-                "Utils: sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(name?), help()",
+                "Builtins: read, edit, write, bash, grep, find, ls, load, save,",
+                "  subagent, mcp, mcp_call, mcp_connect, mcp_disconnect,",
+                "  sleep, diff, retry, vars, clear, help",
             ].join("\n"),
         ],
 
-        async execute(_toolCallId, params, signal, onUpdate, ctx) {
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
             if (!repl) repl = initRepl(ctx.cwd);
 
             const code = params.code;
@@ -475,9 +273,7 @@ export default function spindle(pi: ExtensionAPI) {
                 };
             }
 
-            currentOnUpdate = onUpdate;
             currentSignal = signal;
-            currentCode = code;
 
             try {
                 const result = await repl.exec(code, { signal });
@@ -496,7 +292,6 @@ export default function spindle(pi: ExtensionAPI) {
                     isError: !!result.error,
                 };
             } finally {
-                currentOnUpdate = undefined;
                 currentSignal = undefined;
             }
         },
@@ -510,24 +305,25 @@ export default function spindle(pi: ExtensionAPI) {
         },
     });
 
+    // --- spindle_status ---
+
     pi.registerTool({
         name: "spindle_status",
         label: "Spindle Status",
-        description: "Show REPL variables, active workers, usage stats, and configuration.",
+        description: "Show REPL variables, active subagents, usage stats, and configuration.",
         parameters: Type.Object({}),
 
         async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
             if (!repl) repl = initRepl(ctx.cwd);
 
             const variables = repl.getVariables();
-            const workers = getActiveWorkers();
+            const subs = getActiveSubagents();
 
-            // Build worker summary
-            const workerLines: string[] = [];
-            for (const [id, h] of workers) {
+            const subLines: string[] = [];
+            for (const [, h] of subs) {
                 const elapsed = Date.now() - h.startTime;
-                const duration = elapsed < 60000 ? `${(elapsed / 1000).toFixed(0)}s` : `${(elapsed / 60000).toFixed(1)}m`;
-                workerLines.push(`  ${id}: ${h.status} (${duration}) — ${h.task.slice(0, 60)}`);
+                const dur = elapsed < 60000 ? `${(elapsed / 1000).toFixed(0)}s` : `${(elapsed / 60000).toFixed(1)}m`;
+                subLines.push(`  ${h.id}: ${h.status} (${dur}) — ${h.task.slice(0, 60)}`);
             }
 
             const details: SpindleStatusDetails = {
@@ -540,23 +336,17 @@ export default function spindle(pi: ExtensionAPI) {
                 ? variables.map(v => `  ${v.name}: ${v.type} = ${v.preview}`).join("\n")
                 : "  (none)";
 
-            const parts = [
-                "Spindle Status", "", "Variables:", varSummary, "",
-            ];
-
-            if (workerLines.length > 0) {
-                parts.push("Workers:");
-                parts.push(...workerLines);
-                parts.push("");
+            const p = ["Spindle Status", "", "Variables:", varSummary, ""];
+            if (subLines.length > 0) {
+                p.push("Subagents:", ...subLines, "");
             }
-
-            parts.push(
-                `Usage: ${cumulativeUsage.totalLlmCalls} sub-agent calls, $${cumulativeUsage.totalCost.toFixed(4)}`,
+            p.push(
+                `Usage: ${cumulativeUsage.totalSubagents} subagent calls, $${cumulativeUsage.totalCost.toFixed(4)}`,
                 `Config: sub-model=${subModel || "(default)"}`,
             );
 
             return {
-                content: [{ type: "text", text: parts.join("\n") }],
+                content: [{ type: "text", text: p.join("\n") }],
                 details,
             };
         },
@@ -571,10 +361,10 @@ export default function spindle(pi: ExtensionAPI) {
         },
     });
 
-    // --- Commands ---
+    // --- /spindle command ---
 
     pi.registerCommand("spindle", {
-        description: "Spindle REPL control — reset, config, run scripts, attach to workers, list workers",
+        description: "Spindle control — reset, config, attach to subagents, list subagents",
         async handler(args, ctx) {
             const parts = args.trim().split(/\s+/);
             const sub = parts[0]?.toLowerCase();
@@ -590,55 +380,50 @@ export default function spindle(pi: ExtensionAPI) {
                     pi.appendEntry("spindle-config", { subModel });
                     ctx.ui.notify(`Sub-model set to: ${subModel || "(default)"}`, "info");
                 } else {
-                    ctx.ui.notify("Usage: /spindle config <subModel> <value>", "warning");
+                    ctx.ui.notify("Usage: /spindle config subModel <value>", "warning");
                 }
             } else if (sub === "attach") {
-                const workerId = parts[1];
-                if (!workerId) {
-                    ctx.ui.notify("Usage: /spindle attach <worker-id>", "warning");
+                const id = parts[1];
+                if (!id) {
+                    ctx.ui.notify("Usage: /spindle attach <id>", "warning");
                     return;
                 }
-                const handle = getWorker(workerId);
+                const handle = getSubagent(id);
                 if (!handle) {
-                    ctx.ui.notify(`No worker found with id: ${workerId}`, "error");
+                    ctx.ui.notify(`No subagent: ${id}`, "error");
                     return;
                 }
-                // Determine how to attach
-                const inTmux = !!process.env.TMUX;
-                if (inTmux) {
-                    // Switch to the worker's tmux session
+                if (process.env.TMUX) {
                     try {
                         execSync(`tmux switch-client -t ${JSON.stringify(handle.session)}`, { stdio: "pipe" });
                         ctx.ui.notify(`Switched to ${handle.session}`, "info");
-                    } catch (err: any) {
-                        ctx.ui.notify(`Failed to switch: ${err.message}. Try: tmux attach -t ${handle.session}`, "error");
+                    } catch {
+                        ctx.ui.notify(`Try: tmux attach -t ${handle.session}`, "error");
                     }
                 } else {
-                    // Not in tmux — try to open a new terminal
                     const terminal = process.env.TERMINAL || "xterm";
                     try {
                         nodeSpawn(terminal, ["-e", "tmux", "attach", "-t", handle.session], {
-                            detached: true,
-                            stdio: "ignore",
+                            detached: true, stdio: "ignore",
                         }).unref();
                         ctx.ui.notify(`Opening ${handle.session} in new terminal`, "info");
                     } catch {
-                        ctx.ui.notify(`Run manually: tmux attach -t ${handle.session}`, "info");
+                        ctx.ui.notify(`Run: tmux attach -t ${handle.session}`, "info");
                     }
                 }
             } else if (sub === "list") {
-                const workers = getActiveWorkers();
-                if (workers.size === 0) {
-                    ctx.ui.notify("No active workers", "info");
+                const subs = getActiveSubagents();
+                if (subs.size === 0) {
+                    ctx.ui.notify("No active subagents", "info");
                     return;
                 }
                 const lines: string[] = [];
-                for (const [id, h] of workers) {
+                for (const [, h] of subs) {
                     const elapsed = Date.now() - h.startTime;
-                    const duration = elapsed < 60000 ? `${(elapsed / 1000).toFixed(0)}s` : `${(elapsed / 60000).toFixed(1)}m`;
+                    const dur = elapsed < 60000 ? `${(elapsed / 1000).toFixed(0)}s` : `${(elapsed / 60000).toFixed(1)}m`;
                     const resolved = (h as any).resolved;
                     const icon = resolved ? "✓" : "⏳";
-                    lines.push(`${icon} ${id} (${duration}) tmux:${h.session} branch:${h.branch}`);
+                    lines.push(`${icon} ${h.id} (${dur}) tmux:${h.session}${h.branch ? ` branch:${h.branch}` : ""}`);
                     lines.push(`  ${h.task.slice(0, 80)}`);
                 }
                 ctx.ui.notify(lines.join("\n"), "info");
@@ -653,6 +438,7 @@ export default function spindle(pi: ExtensionAPI) {
     });
 }
 
+// Exports
 export { Repl } from "./repl.js";
 export { createDiff, retry, createContextTools } from "./builtins.js";
 export type { RetryOptions } from "./builtins.js";
@@ -660,5 +446,5 @@ export { createToolWrappers, createFileIO, load, save } from "./tools.js";
 export { discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";
 export { mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup } from "./mcp.js";
-export { spawn, killAllWorkers, getActiveWorkers, getWorker } from "./workers.js";
-export type { WorkerHandle, WorkerResult, SpawnOptions } from "./workers.js";
+export { subagent, killAllSubagents, getActiveSubagents, getSubagent } from "./workers.js";
+export type { SubagentHandle, AgentResult, SubagentOptions } from "./workers.js";

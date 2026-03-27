@@ -1,11 +1,11 @@
 /**
- * Worker management — async subagents in tmux sessions with git worktree isolation.
+ * Subagent management — async agents in tmux sessions with optional git worktree isolation.
  *
- * spawn() creates a worktree, starts a tmux session with a pi process,
- * and returns a handle immediately. The main agent keeps working.
+ * subagent() creates a tmux session (and optionally a worktree), starts a pi
+ * process, and returns a handle immediately. The main agent keeps working.
  */
 
-import { execSync, spawn as nodeSpawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -15,9 +15,34 @@ import { discoverAgents, resolveAgent, getExtensionDir } from "./agents.js";
 // Types
 // ---------------------------------------------------------------------------
 
-export type WorkerStatus = "running" | "done" | "crashed";
+export type SubagentStatus = "running" | "done" | "crashed";
 
-export interface WorkerEpisode {
+export interface AgentResult {
+    // Episode
+    status: "success" | "failure" | "blocked";
+    summary: string;
+    findings: string[];
+    artifacts: string[];
+    blockers: string[];
+
+    // Raw output
+    text: string;
+    ok: boolean;
+
+    // Execution metadata
+    cost: number;
+    model: string;
+    turns: number;
+    toolCalls: number;
+    durationMs: number;
+    exitCode: number;
+
+    // Worktree (undefined when worktree: false)
+    branch?: string;
+    worktree?: string;
+}
+
+export interface StatusFileEpisode {
     status: "success" | "failure" | "blocked";
     summary: string;
     findings: string[];
@@ -25,8 +50,8 @@ export interface WorkerEpisode {
     blockers: string[];
 }
 
-export interface WorkerStatusFile {
-    status: WorkerStatus;
+export interface StatusFile {
+    status: SubagentStatus;
     currentTool?: string;
     currentArgs?: string;
     startTime: number;
@@ -37,27 +62,12 @@ export interface WorkerStatusFile {
     model?: string;
     exitCode?: number;
     summary?: string;
-    episode?: WorkerEpisode;
+    text?: string;
+    episode?: StatusFileEpisode;
     lastUpdate: number;
 }
 
-export interface WorkerResult {
-    status: "success" | "failure";
-    summary: string;
-    findings: string[];
-    artifacts: string[];
-    blockers: string[];
-    branch: string;
-    worktree: string;
-    exitCode: number;
-    turns: number;
-    toolCalls: number;
-    cost: number;
-    model: string;
-    durationMs: number;
-}
-
-export interface SpawnOptions {
+export interface SubagentOptions {
     name?: string;
     agent?: string;
     model?: string;
@@ -67,43 +77,42 @@ export interface SpawnOptions {
     systemPromptSuffix?: string;
 }
 
-export interface WorkerHandle {
+export interface SubagentHandle {
     readonly id: string;
-    readonly branch: string;
-    readonly worktree: string;
-    readonly session: string;
     readonly task: string;
+    readonly session: string;
     readonly startTime: number;
-    readonly status: WorkerStatus;
-    readonly result: Promise<WorkerResult>;
+    readonly branch?: string;
+    readonly worktree?: string;
+    readonly status: SubagentStatus;
+    readonly result: Promise<AgentResult>;
     cancel(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
-// Worker Manager
+// Subagent Manager
 // ---------------------------------------------------------------------------
 
-let workerCounter = 0;
-const activeWorkers = new Map<string, WorkerHandleImpl>();
+let counter = 0;
+const active = new Map<string, SubagentHandleImpl>();
 
-/** Callbacks for external integration (dashboard, notifications). */
-export interface WorkerCallbacks {
-    onStatusChange?: (handle: WorkerHandle) => void;
-    onWorkerDone?: (handle: WorkerHandle, result: WorkerResult) => void;
+export interface SubagentCallbacks {
+    onStatusChange?: (handle: SubagentHandle) => void;
+    onDone?: (handle: SubagentHandle, result: AgentResult) => void;
 }
 
-let callbacks: WorkerCallbacks = {};
+let callbacks: SubagentCallbacks = {};
 
-export function setWorkerCallbacks(cb: WorkerCallbacks): void {
+export function setSubagentCallbacks(cb: SubagentCallbacks): void {
     callbacks = cb;
 }
 
-export function getActiveWorkers(): Map<string, WorkerHandle> {
-    return activeWorkers as Map<string, WorkerHandle>;
+export function getActiveSubagents(): Map<string, SubagentHandle> {
+    return active as Map<string, SubagentHandle>;
 }
 
-export function getWorker(id: string): WorkerHandle | undefined {
-    return activeWorkers.get(id);
+export function getSubagent(id: string): SubagentHandle | undefined {
+    return active.get(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -122,38 +131,21 @@ function createWorktree(gitRoot: string, id: string): { worktree: string; branch
     const branch = `spindle/${id}`;
     const worktreeDir = path.join(gitRoot, ".worktrees", id);
 
-    // Ensure .worktrees directory exists
     fs.mkdirSync(path.join(gitRoot, ".worktrees"), { recursive: true });
 
     // Add .worktrees to .gitignore if not already there
     const gitignorePath = path.join(gitRoot, ".gitignore");
     let gitignore = "";
-    try { gitignore = fs.readFileSync(gitignorePath, "utf-8"); } catch { /* no gitignore */ }
+    try { gitignore = fs.readFileSync(gitignorePath, "utf-8"); } catch {}
     if (!gitignore.includes(".worktrees")) {
         fs.appendFileSync(gitignorePath, "\n.worktrees/\n");
     }
 
     execSync(`git worktree add ${JSON.stringify(worktreeDir)} -b ${JSON.stringify(branch)}`, {
-        cwd: gitRoot,
-        stdio: "pipe",
+        cwd: gitRoot, stdio: "pipe",
     });
 
     return { worktree: worktreeDir, branch };
-}
-
-function removeWorktree(gitRoot: string, worktreeDir: string, branch: string): void {
-    try {
-        execSync(`git worktree remove ${JSON.stringify(worktreeDir)} --force`, {
-            cwd: gitRoot,
-            stdio: "pipe",
-        });
-    } catch { /* already removed */ }
-    try {
-        execSync(`git branch -D ${JSON.stringify(branch)}`, {
-            cwd: gitRoot,
-            stdio: "pipe",
-        });
-    } catch { /* already deleted */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +184,7 @@ function createTmuxSession(session: string, cwd: string, command: string): void 
 function killTmuxSession(session: string): void {
     try {
         execSync(`tmux kill-session -t ${JSON.stringify(session)}`, { stdio: "pipe" });
-    } catch { /* already dead */ }
+    } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -202,11 +194,10 @@ function killTmuxSession(session: string): void {
 const STATUS_DIR = ".spindle";
 const STATUS_FILE = "status.json";
 
-function readStatusFile(worktreeDir: string): WorkerStatusFile | null {
-    const filePath = path.join(worktreeDir, STATUS_DIR, STATUS_FILE);
+export function readStatusFile(dir: string): StatusFile | null {
+    const filePath = path.join(dir, STATUS_DIR, STATUS_FILE);
     try {
-        const raw = fs.readFileSync(filePath, "utf-8");
-        return JSON.parse(raw) as WorkerStatusFile;
+        return JSON.parse(fs.readFileSync(filePath, "utf-8")) as StatusFile;
     } catch {
         return null;
     }
@@ -220,7 +211,6 @@ function getWorkerExtensionPath(): string {
     const extDir = getExtensionDir();
     if (!extDir) throw new Error("Spindle extension directory not set");
 
-    // Look for worker-extension.js (compiled) or worker-extension.ts (source)
     const jsPath = path.join(extDir, "worker-extension.js");
     const tsPath = path.join(extDir, "worker-extension.ts");
     if (fs.existsSync(jsPath)) return jsPath;
@@ -230,12 +220,12 @@ function getWorkerExtensionPath(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Build pi command for worker
+// Build pi command
 // ---------------------------------------------------------------------------
 
 function buildPiCommand(
     task: string,
-    opts: SpawnOptions,
+    opts: SubagentOptions,
     workerExtPath: string,
     cwd: string,
 ): string {
@@ -251,89 +241,86 @@ function buildPiCommand(
     const tools = opts.tools ?? agentConfig?.tools;
     if (tools?.length) args.push("--tools", tools.join(","));
 
-    // Build the system prompt suffix as a temp file
     const promptParts: string[] = [];
     if (agentConfig?.systemPrompt?.trim()) promptParts.push(agentConfig.systemPrompt);
     if (opts.systemPromptSuffix?.trim()) promptParts.push(opts.systemPromptSuffix);
 
     if (promptParts.length > 0) {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-worker-"));
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-sub-"));
         const tmpFile = path.join(tmpDir, "prompt.md");
         fs.writeFileSync(tmpFile, promptParts.join("\n\n"), { encoding: "utf-8", mode: 0o600 });
         args.push("--append-system-prompt", tmpFile);
     }
 
-    // Quote the task for shell
     args.push(JSON.stringify(`Task: ${task}`));
-
     return args.join(" ");
 }
 
 // ---------------------------------------------------------------------------
-// Fallback: non-git temp directory
+// SubagentHandle implementation
 // ---------------------------------------------------------------------------
 
-function createTempWorktree(id: string): { worktree: string; branch: string } {
-    const dir = path.join(os.tmpdir(), `spindle-worker-${id}`);
-    fs.mkdirSync(dir, { recursive: true });
-    return { worktree: dir, branch: `spindle/${id}` };
+function emptyResult(handle: SubagentHandleImpl, summary: string): AgentResult {
+    return {
+        status: "failure",
+        summary,
+        findings: [],
+        artifacts: [],
+        blockers: [],
+        text: "",
+        ok: false,
+        cost: 0,
+        model: "unknown",
+        turns: 0,
+        toolCalls: 0,
+        durationMs: Date.now() - handle.startTime,
+        exitCode: -1,
+        branch: handle.branch,
+        worktree: handle.worktree,
+    };
 }
 
-// ---------------------------------------------------------------------------
-// WorkerHandle implementation
-// ---------------------------------------------------------------------------
-
-class WorkerHandleImpl implements WorkerHandle {
+class SubagentHandleImpl implements SubagentHandle {
     readonly id: string;
-    readonly branch: string;
-    readonly worktree: string;
-    readonly session: string;
     readonly task: string;
+    readonly session: string;
     readonly startTime: number;
-    private _result: Promise<WorkerResult>;
-    private _resolveResult!: (result: WorkerResult) => void;
+    readonly branch?: string;
+    readonly worktree?: string;
+    /** Directory where .spindle/status.json lives — worktree dir or cwd. */
+    readonly statusDir: string;
+    private _result: Promise<AgentResult>;
+    private _resolveResult!: (result: AgentResult) => void;
     private _resolved = false;
-    private _gitRoot: string | null;
-    private _isGitWorktree: boolean;
 
     constructor(
-        id: string,
-        branch: string,
-        worktree: string,
-        session: string,
-        task: string,
-        gitRoot: string | null,
-        isGitWorktree: boolean,
+        id: string, task: string, session: string,
+        statusDir: string, branch?: string, worktree?: string,
     ) {
         this.id = id;
+        this.task = task;
+        this.session = session;
+        this.startTime = Date.now();
+        this.statusDir = statusDir;
         this.branch = branch;
         this.worktree = worktree;
-        this.session = session;
-        this.task = task;
-        this.startTime = Date.now();
-        this._gitRoot = gitRoot;
-        this._isGitWorktree = isGitWorktree;
-
-        this._result = new Promise<WorkerResult>((resolve) => {
+        this._result = new Promise<AgentResult>((resolve) => {
             this._resolveResult = resolve;
         });
     }
 
-    get status(): WorkerStatus {
-        const sf = readStatusFile(this.worktree);
+    get status(): SubagentStatus {
+        const sf = readStatusFile(this.statusDir);
         if (sf) return sf.status;
-
-        // No status file yet — check if tmux session is alive
         if (!tmuxSessionExists(this.session)) return "crashed";
         return "running";
     }
 
-    get result(): Promise<WorkerResult> {
+    get result(): Promise<AgentResult> {
         return this._result;
     }
 
-    /** Called by the poller when the worker is detected as finished. */
-    _resolve(result: WorkerResult): void {
+    _resolve(result: AgentResult): void {
         if (this._resolved) return;
         this._resolved = true;
         this._resolveResult(result);
@@ -345,82 +332,65 @@ class WorkerHandleImpl implements WorkerHandle {
 
     async cancel(): Promise<void> {
         killTmuxSession(this.session);
-
-        // Don't remove worktree — preserve work for inspection
-        this._resolve({
-            status: "failure",
-            summary: "Cancelled by user",
-            findings: [],
-            artifacts: [],
-            blockers: [],
-            branch: this.branch,
-            worktree: this.worktree,
-            exitCode: -1,
-            turns: 0,
-            toolCalls: 0,
-            cost: 0,
-            model: "unknown",
-            durationMs: Date.now() - this.startTime,
-        });
-
-        activeWorkers.delete(this.id);
-        callbacks.onWorkerDone?.(this, await this._result);
+        const result = emptyResult(this, "Cancelled by user");
+        this._resolve(result);
+        active.delete(this.id);
+        callbacks.onDone?.(this, result);
     }
 }
 
 // ---------------------------------------------------------------------------
-// spawn()
+// subagent()
 // ---------------------------------------------------------------------------
 
-export function spawn(
+export function subagent(
     task: string,
-    opts: SpawnOptions = {},
+    opts: SubagentOptions = {},
     defaultCwd: string = process.cwd(),
     defaultModel?: string,
-): WorkerHandle {
+): SubagentHandle {
     if (!hasTmux()) {
-        throw new Error("tmux is required for async workers. Install tmux and try again.");
+        throw new Error("tmux is required for subagents. Install tmux and try again.");
     }
 
-    const id = `w${workerCounter++}`;
+    const id = `w${counter++}`;
     const sessionName = `spindle-${id}`;
-    const useWorktree = opts.worktree !== false;
+    const useWorktree = opts.worktree === true;
 
-    const gitRoot = getGitRoot(defaultCwd);
-    let worktreeDir: string;
-    let branch: string;
-    let isGitWorktree: boolean;
+    let branch: string | undefined;
+    let worktreeDir: string | undefined;
+    let statusDir: string;
+    let agentCwd: string;
 
-    if (useWorktree && gitRoot) {
+    if (useWorktree) {
+        const gitRoot = getGitRoot(defaultCwd);
+        if (!gitRoot) {
+            throw new Error("Cannot create worktree: not in a git repository. Use { worktree: false }.");
+        }
         const wt = createWorktree(gitRoot, id);
         worktreeDir = wt.worktree;
         branch = wt.branch;
-        isGitWorktree = true;
+        statusDir = worktreeDir;
+        agentCwd = worktreeDir;
     } else {
-        // Non-git fallback: use a temp directory
-        const tmp = createTempWorktree(id);
-        worktreeDir = tmp.worktree;
-        branch = tmp.branch;
-        isGitWorktree = false;
-
-        // Copy the current directory contents to the temp dir if in a project
-        if (useWorktree) {
-            // Just use the defaultCwd directly — no isolation
-            worktreeDir = defaultCwd;
-        }
+        statusDir = defaultCwd;
+        agentCwd = defaultCwd;
     }
 
     const workerExtPath = getWorkerExtensionPath();
-    const command = buildPiCommand(task, { ...opts, model: opts.model ?? defaultModel }, workerExtPath, worktreeDir);
-
-    // Create the tmux session and start pi
-    createTmuxSession(sessionName, worktreeDir, command);
-
-    const handle = new WorkerHandleImpl(
-        id, branch, worktreeDir, sessionName, task, gitRoot, isGitWorktree,
+    const command = buildPiCommand(
+        task,
+        { ...opts, model: opts.model ?? defaultModel },
+        workerExtPath,
+        agentCwd,
     );
-    activeWorkers.set(id, handle);
 
+    createTmuxSession(sessionName, agentCwd, command);
+
+    const handle = new SubagentHandleImpl(
+        id, task, sessionName, statusDir, branch, worktreeDir,
+    );
+    active.set(id, handle);
     callbacks.onStatusChange?.(handle);
 
     return handle;
@@ -430,32 +400,16 @@ export function spawn(
 // Cleanup
 // ---------------------------------------------------------------------------
 
-/** Kill all running workers. Called on session shutdown. */
-export function killAllWorkers(): void {
-    for (const [id, handle] of activeWorkers) {
+export function killAllSubagents(): void {
+    for (const [, handle] of active) {
         if (!handle.resolved) {
             killTmuxSession(handle.session);
-            handle._resolve({
-                status: "failure",
-                summary: "Session ended — worker killed",
-                findings: [],
-                artifacts: [],
-                blockers: [],
-                branch: handle.branch,
-                worktree: handle.worktree,
-                exitCode: -1,
-                turns: 0,
-                toolCalls: 0,
-                cost: 0,
-                model: "unknown",
-                durationMs: Date.now() - handle.startTime,
-            });
+            handle._resolve(emptyResult(handle, "Session ended — subagent killed"));
         }
     }
-    activeWorkers.clear();
+    active.clear();
 }
 
-/** Reset the worker counter (for testing). */
-export function resetWorkerCounter(): void {
-    workerCounter = 0;
+export function resetCounter(): void {
+    counter = 0;
 }
