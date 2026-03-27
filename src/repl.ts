@@ -226,7 +226,12 @@ export class Repl {
                 returnValue = await execPromise;
             }
         } catch (err: unknown) {
-            error = formatError(err);
+            // Clean message for abort instead of a stack trace
+            if (err instanceof Error && err.message === "Execution aborted") {
+                error = "Aborted";
+            } else {
+                error = formatError(err);
+            }
         }
 
         // Auto-print: if no console output and returnValue is meaningful, display it.

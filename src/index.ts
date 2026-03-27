@@ -17,6 +17,7 @@ import {
 } from "./workers.js";
 import { startPoller, stopPoller } from "./poller.js";
 import { renderDashboard } from "./dashboard.js";
+import type { Theme } from "@mariozechner/pi-coding-agent";
 import {
     formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
@@ -46,15 +47,33 @@ export default function spindle(pi: ExtensionAPI) {
     let currentSignal: AbortSignal | undefined;
 
     // Dashboard
-    let setWidget: ((lines: string[] | undefined) => void) | null = null;
+    let widgetUi: any = null;
+    let clearTimer: ReturnType<typeof setTimeout> | null = null;
 
     function updateDashboard(): void {
+        if (!widgetUi) return;
         const subs = getActiveSubagents();
         if (subs.size === 0) {
-            setWidget?.(undefined);
+            try { widgetUi.setWidget("spindle-subagents", undefined); } catch {}
             return;
         }
-        setWidget?.(renderDashboard(subs));
+
+        try {
+            // Factory form: receives (tui, theme) from pi, so we always use the current theme
+            widgetUi.setWidget("spindle-subagents", (_tui: any, theme: Theme) => renderDashboard(subs, theme));
+        } catch {}
+
+        // Auto-clear after all done
+        const allDone = [...subs.values()].every((h: any) => h.resolved);
+        if (allDone) {
+            if (clearTimer) clearTimeout(clearTimer);
+            clearTimer = setTimeout(() => {
+                try { widgetUi?.setWidget("spindle-subagents", undefined); } catch {}
+                clearTimer = null;
+            }, 5000);
+        } else {
+            if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
+        }
     }
 
     function initRepl(workingDir: string): Repl {
@@ -194,9 +213,7 @@ export default function spindle(pi: ExtensionAPI) {
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
 
-        setWidget = (lines) => {
-            try { ctx.ui.setWidget("spindle-subagents", lines as any); } catch {}
-        };
+        widgetUi = ctx.ui;
 
         // Restore config
         const entries = ctx.sessionManager.getEntries();
@@ -213,8 +230,9 @@ export default function spindle(pi: ExtensionAPI) {
     pi.on("session_shutdown", async () => {
         killAllSubagents();
         stopPoller();
-        setWidget?.(undefined);
-        setWidget = null;
+        if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
+        try { widgetUi?.setWidget("spindle-subagents", undefined); } catch {}
+        widgetUi = null;
         await mcpCleanup();
         repl = null;
     });
