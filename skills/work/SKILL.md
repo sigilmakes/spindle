@@ -73,16 +73,12 @@ For **implementer-critic**, there's no task list — just a goal string. For **a
 
 ## Running
 
-Read the relevant pattern reference, then run inline or as a script:
+Read the relevant pattern reference, then run in spindle:
 
 ```javascript
-// Inline for small plans
 spindle_exec({ code: `
     // ... adapted from pattern reference
 `})
-
-// Script for complex plans
-spindle_exec({ file: "path/to/work.spindle.js" })
 ```
 
 ## State & Resumption

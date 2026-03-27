@@ -27,7 +27,7 @@ for (const task of tasks) {
     let approved = false
 
     // Save checkpoint — reset to this on any revert
-    checkpoint = (await bash({ command: "git rev-parse HEAD" })).stdout.trim()
+    checkpoint = (await bash({ command: "git rev-parse HEAD" })).output.trim()
 
     // === Inner loop: implement/review ===
     for (let attempt = 0; attempt < maxReviewAttempts; attempt++) {
@@ -43,8 +43,8 @@ Make exactly one commit when done.`, {
             name: `impl-${task.id}-${attempt}`
         })
 
-        if (impl.status !== "success") {
-            console.log(`❌ Implementation failed: ${impl.summary}`)
+        if (!impl.ok) {
+            console.log(`❌ Implementation failed`)
             await bash({ command: `git reset --hard ${checkpoint}` })
             break
         }
@@ -60,34 +60,32 @@ Evaluate:
 - Code quality: is it clean, well-named, idiomatic?
 - Tests: are changes tested?
 
-Set your episode status to SUCCESS only if you would merge this as-is.
-Set FAILURE if changes are needed — put specific, actionable feedback in your findings.
+If you would merge this as-is, say APPROVED.
+If changes are needed, say REJECTED and list specific, actionable issues.
 Do not rubber-stamp. Be rigorous.`, {
             name: `review-${task.id}-${attempt}`
         })
 
-        if (review.status === "success") {
+        if (review.text.includes("APPROVED")) {
             approved = true
             console.log(`✅ Approved: ${task.description}`)
             break
         }
 
-        // Review rejected — prepare feedback for next attempt
-        feedback = review.findings.join("\n")
+        // Review rejected
+        feedback = review.text
         console.log(`🔄 Review rejected (attempt ${attempt + 1}/${maxReviewAttempts})`)
-        console.log(`   Feedback: ${feedback.slice(0, 200)}`)
 
-        // Reset to checkpoint — handles any number of commits cleanly
+        // Reset to checkpoint
         await bash({ command: `git reset --hard ${checkpoint}` })
     }
 
     if (approved) {
-        progress += `\n- ${task.description}: ${impl.summary}`
+        progress += `\n- ${task.description}: done`
         task.done = true
         await save(".pi/work-tasks.json", JSON.stringify(tasks, null, 2))
     } else {
         console.log(`❌ Failed after ${maxReviewAttempts} attempts: ${task.description}`)
-        console.log(`Last feedback:\n${feedback}`)
         await bash({ command: `git reset --hard ${checkpoint}` })
         console.log("Stopping — review loop exhausted. Intervene and restart.")
         break
@@ -99,33 +97,26 @@ tasks = JSON.parse(await load(".pi/work-tasks.json"))
 done = tasks.filter(t => t.done).length
 remaining = tasks.filter(t => !t.done).length
 console.log(`\nComplete: ${done} done, ${remaining} remaining`)
-console.log(`\nProgress:\n${progress}`)
 ```
 
 ## Prompt Discipline
 
 The reviewer prompt is critical. Key lines:
 
-- **"Set your episode status to SUCCESS only if you would merge this as-is."** — Forces a real judgment, not a rubber stamp.
-- **"Set FAILURE if changes are needed — put specific, actionable feedback in your findings."** — Ensures feedback is useful for the next implementation attempt.
+- **"If you would merge this as-is, say APPROVED."** — Forces a real judgment, not a rubber stamp.
+- **"If changes are needed, say REJECTED and list specific, actionable issues."** — Ensures feedback is useful.
 - **"Do not rubber-stamp. Be rigorous."** — Explicit instruction against approval bias.
-
-Without these, reviewers approve nearly everything and the loop degenerates into a ralph loop with extra cost.
 
 ## Revert Strategy
 
-The template saves a git ref (`checkpoint`) before each task and uses `git reset --hard` to revert. This is robust regardless of how many commits the implementer makes — one, three, or zero. No need to guess at `HEAD~N` or hope `git revert` handles edge cases.
-
-The reviewer also diffs against the checkpoint (`git diff ${checkpoint}`) instead of `HEAD~1`, so it sees the full change regardless of commit count.
+The template saves a git ref (`checkpoint`) before each task and uses `git reset --hard` to revert. Robust regardless of commit count.
 
 ## Parallelism
 
-The same caveats from ralph apply here, but amplified: the review cycle makes parallelism harder because each task's implement/review loop is stateful. Don't parallelize ralph-critic tasks unless they are completely file-disjoint and you're using separate worktrees or branches.
-
-Sequential is the right default for this pattern.
+The review cycle makes parallelism harder because each task's implement/review loop is stateful. Use `spawn()` with worktrees only for truly independent tasks. Sequential is the right default for this pattern.
 
 ## Gotchas
 
 - **Reviewer and implementer need different prompts.** Same prompt reviewing its own work has approval bias.
-- **The implementer gets the reviewer's feedback verbatim.** If the feedback is vague ("needs improvement"), the next attempt will be random. The review prompt must demand specifics.
-- **Progress string can mislead.** If a task was implemented, reverted, and re-implemented, the progress only shows the final version. Previous attempts are in git history.
+- **Progress string can mislead.** If a task was reverted and re-implemented, progress only shows the final version.
+- **The progress string grows.** For long task lists, truncate to the last 10 entries.

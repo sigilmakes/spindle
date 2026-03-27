@@ -21,7 +21,7 @@ import {
 import { startPoller, stopPoller } from "./poller.js";
 import { renderDashboard } from "./dashboard.js";
 import {
-    formatCodeForDisplay, formatFileExecForDisplay, formatExecResult, formatStatusResult,
+    formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
 
@@ -122,10 +122,33 @@ export default function spindle(pi: ExtensionAPI) {
                             : `${(result.durationMs / 60000).toFixed(1)}m`;
 
                         const icon = result.status === "success" ? "✓" : "✗";
+
+                        // Build structured content for the agent
+                        const parts = [
+                            `${icon} Worker **${handle.id}** finished (${duration}). Branch: \`${handle.branch}\``,
+                            "",
+                            `**Status:** ${result.status}`,
+                            `**Summary:** ${result.summary.slice(0, 500)}`,
+                        ];
+                        if (result.findings.length > 0) {
+                            parts.push("", "**Findings:**");
+                            for (const f of result.findings) parts.push(`- ${f}`);
+                        }
+                        if (result.artifacts.length > 0) {
+                            parts.push("", "**Artifacts:**");
+                            for (const a of result.artifacts) parts.push(`- ${a}`);
+                        }
+                        if (result.blockers.length > 0) {
+                            parts.push("", "**Blockers:**");
+                            for (const b of result.blockers) parts.push(`- ${b}`);
+                        }
+                        parts.push("", `Cost: $${result.cost.toFixed(4)} | Turns: ${result.turns} | Tools: ${result.toolCalls}`);
+
                         pi.sendMessage({
                             customType: "spindle-worker-done",
-                            content: `${icon} Worker **${handle.id}** finished (${duration}). Branch: \`${handle.branch}\`\n\n${result.summary.slice(0, 500)}`,
+                            content: parts.join("\n"),
                             display: true,
+                            details: result,
                         }, {
                             deliverAs: "followUp",
                             triggerTurn: true,
@@ -350,7 +373,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "  /spindle attach <id>        Open worker's tmux session",
                 "  /spindle list               Show active workers",
                 "  /spindle reset              Reset REPL state",
-                "  /spindle config ...         Configure sub-model",
+                "  /spindle config subModel <m> Set default worker model",
                 "",
                 "Scoping: const, let, var, and bare assignments all persist across calls.",
             ].join("\n"),
@@ -358,29 +381,6 @@ export default function spindle(pi: ExtensionAPI) {
 
         return r;
     }
-
-    // Fast-path: script execution mode
-    let scriptExecMode = false;
-
-    pi.on("input", async (event) => {
-        if (event.text.includes("spindle_exec({ file:") && event.text.includes("Execute this spindle script")) {
-            scriptExecMode = true;
-            const match = event.text.match(/spindle_exec\(\{[^}]+\}\)/);
-            if (match) {
-                return { action: "transform" as const, text: match[0] };
-            }
-        }
-        return { action: "continue" as const };
-    });
-
-    pi.on("before_agent_start", async (event) => {
-        if (scriptExecMode) {
-            scriptExecMode = false;
-            return {
-                systemPrompt: "You are a script runner. Call the spindle_exec tool exactly as specified. No other actions.",
-            };
-        }
-    });
 
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
@@ -421,8 +421,7 @@ export default function spindle(pi: ExtensionAPI) {
         label: "Spindle",
         description: "Execute JavaScript in a persistent REPL with built-in tools, async workers, and MCP integration.",
         parameters: Type.Object({
-            code: Type.Optional(Type.String({ description: "JavaScript code to execute" })),
-            file: Type.Optional(Type.String({ description: "Path to a .js or .mjs file to execute (alternative to code)" })),
+            code: Type.String({ description: "JavaScript code to execute" }),
         }),
         promptGuidelines: [
             [
@@ -467,45 +466,13 @@ export default function spindle(pi: ExtensionAPI) {
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
             if (!repl) repl = initRepl(ctx.cwd);
 
-            if (!params.code && !params.file) {
+            const code = params.code;
+            if (!code) {
                 return {
-                    content: [{ type: "text", text: "Error: Either 'code' or 'file' must be provided." }],
+                    content: [{ type: "text", text: "Error: 'code' is required." }],
                     details: { code: "", error: true } satisfies SpindleExecDetails,
                     isError: true,
                 };
-            }
-            if (params.code && params.file) {
-                return {
-                    content: [{ type: "text", text: "Error: Provide either 'code' or 'file', not both." }],
-                    details: { code: "", error: true } satisfies SpindleExecDetails,
-                    isError: true,
-                };
-            }
-
-            let code: string;
-            let file: string | undefined;
-
-            if (params.file) {
-                file = params.file;
-                const resolved = path.resolve(ctx.cwd, file);
-                if (!/\.(js|mjs)$/.test(resolved) && !/\.spindle\.js$/.test(resolved)) {
-                    return {
-                        content: [{ type: "text", text: "Error: File must end in .js, .mjs, or .spindle.js" }],
-                        details: { code: "", file, error: true } satisfies SpindleExecDetails,
-                        isError: true,
-                    };
-                }
-                try {
-                    code = fs.readFileSync(resolved, "utf-8");
-                } catch (err: any) {
-                    return {
-                        content: [{ type: "text", text: `Error reading file: ${err.message}` }],
-                        details: { code: "", file, error: true } satisfies SpindleExecDetails,
-                        isError: true,
-                    };
-                }
-            } else {
-                code = params.code!;
             }
 
             currentOnUpdate = onUpdate;
@@ -513,10 +480,7 @@ export default function spindle(pi: ExtensionAPI) {
             currentCode = code;
 
             try {
-                const result = await repl.exec(code, {
-                    signal,
-                    hoist: !file,
-                });
+                const result = await repl.exec(code, { signal });
 
                 const parts: string[] = [];
                 if (result.output) parts.push(result.output);
@@ -526,7 +490,6 @@ export default function spindle(pi: ExtensionAPI) {
                     content: [{ type: "text", text: parts.join("\n") || "(no output)" }],
                     details: {
                         code,
-                        file,
                         durationMs: result.durationMs,
                         error: !!result.error,
                     } satisfies SpindleExecDetails,
@@ -539,9 +502,6 @@ export default function spindle(pi: ExtensionAPI) {
         },
 
         renderCall(args, theme) {
-            if (args.file) {
-                return new Text(formatFileExecForDisplay(args.file, theme), 0, 0);
-            }
             return new Text(formatCodeForDisplay(args.code || "", theme), 0, 0);
         },
 
@@ -632,13 +592,6 @@ export default function spindle(pi: ExtensionAPI) {
                 } else {
                     ctx.ui.notify("Usage: /spindle config <subModel> <value>", "warning");
                 }
-            } else if (sub === "run") {
-                const filePath = parts.slice(1).join(" ").trim();
-                if (!filePath) {
-                    ctx.ui.notify("Usage: /spindle run <path.js>", "warning");
-                } else {
-                    pi.sendUserMessage(`Execute this script using spindle_exec with the file parameter:\n\nspindle_exec({ file: ${JSON.stringify(filePath)} })`);
-                }
             } else if (sub === "attach") {
                 const workerId = parts[1];
                 if (!workerId) {
@@ -692,7 +645,7 @@ export default function spindle(pi: ExtensionAPI) {
             } else if (sub === "status") {
                 pi.sendUserMessage("Show Spindle status using the spindle_status tool.");
             } else if (!sub || sub === "help") {
-                ctx.ui.notify("Usage: /spindle <reset|config|status|run|attach|list>", "info");
+                ctx.ui.notify("Usage: /spindle <reset|config|status|attach|list>", "info");
             } else {
                 pi.sendUserMessage(`Use Spindle (spindle_exec) for this task:\n\n${args}`);
             }

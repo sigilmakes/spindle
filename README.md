@@ -1,186 +1,186 @@
 # Spindle
 
-A persistent JavaScript REPL extension for [pi](https://github.com/mariozechner/pi). Gives the agent pi tools as callable functions, MCP access to external services, and focused sub-agent orchestration — all in a persistent environment where variables survive across calls.
+Async agent orchestration for [pi](https://github.com/badlogic/pi-mono). Persistent JavaScript REPL with async workers in isolated git worktrees and tmux sessions.
+
+## What it does
+
+Spindle gives the pi agent a JavaScript REPL (`spindle_exec`) for orchestration. The REPL persists state across calls — variables, handles, results all survive between tool invocations.
+
+Workers are async subagents that run in their own git worktrees and tmux sessions. The main agent spawns them and keeps working. When a worker finishes, a notification arrives and the agent can collect results and merge branches.
 
 ## Install
 
 ```bash
-pi install /path/to/spindle
+pi install git:github.com/sigilmakes/spindle
 ```
 
-This gives you:
-- **REPL tools** — `spindle_exec` and `spindle_status` inside pi sessions
-- **Skills** — `repl`, `mcp`, `work` loaded automatically
-- **CLI** — `spindle run`, `spindle lint`, `spindle new` from the terminal
+## Quick start
 
-## The REPL
+```js
+// Spawn an async worker — returns immediately
+h = spawn("Refactor the auth module to use JWT", { worktree: true })
 
-A persistent JavaScript environment. Load data once, query it many ways. Chain pi tools with JS logic between them.
+// Main agent keeps working on other things...
 
-```javascript
-// Load an entire directory into a variable (bypasses context window)
-src = await load("src/")
+// Check status
+h.status  // "running" | "done" | "crashed"
 
-// Query it programmatically — no re-reading, no tool calls
-exports = [...src.entries()].flatMap(([file, content]) =>
-    [...content.matchAll(/export function (\w+)/g)].map(m => ({ file, fn: m[1] }))
-)
+// Collect result when ready
+r = await h.result
+// { status: "success", summary: "...", branch: "spindle/w0", cost: 0.04, ... }
 
-// Cross-reference in JS, not grep pipes
-unused = exports.filter(({ fn, file }) =>
-    ![...src.entries()].some(([f, c]) => f !== file && c.includes(fn))
-)
-console.log(unused.length + " potentially unused exports")
+// Merge the work
+await bash({ command: `git merge ${h.branch}` })
 ```
 
-All pi tools are available as functions: `read()`, `bash()`, `grep()`, `find()`, `edit()`, `write()`, `ls()`, `load()`, `save()`.
+## Architecture
 
-## MCP (Model Context Protocol)
-
-Call external services through MCP servers — issue trackers, documentation APIs, browser automation. Powered by [mcporter](https://github.com/steipete/mcporter), lazy-loaded on first use.
-
-```javascript
-// Discover what's available
-await mcp()                        // list servers
-await mcp("linear")                // list tools
-
-// One-shot call
-result = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
-
-// Persistent proxy — connection pooled, camelCase methods, schema-validated
-linear = await mcp_connect("linear")
-await linear.createIssue({ title: "Bug", team: "ENG" })
-docs = await linear.searchDocumentation({ query: "API" })
-console.log(docs.text())
+```
+Main pi session (TUI)
+│
+├── spindle_exec: h = spawn("task", { worktree: true })
+│   ├── git worktree add .worktrees/w0 -b spindle/w0
+│   ├── tmux new-session -d -s spindle-w0 -c .worktrees/w0
+│   │     └── pi -p --no-session --extension worker-extension.ts "Task: ..."
+│   │           └── writes .spindle/status.json on every tool call
+│   ├── starts polling .worktrees/w0/.spindle/status.json
+│   └── returns WorkerHandle immediately
+│
+├── [agent uses read/edit/bash normally]
+│
+├── [poller detects worker done]
+│   ├── updates dashboard widget
+│   └── pi.sendMessage → triggers agent turn
+│
+└── spindle_exec: r = await h.result → WorkerResult
 ```
 
-Config: `~/.pi/agent/mcp.json` — same `mcpServers` format as Cursor/Claude/VS Code.
+## REPL builtins
 
-## Sub-Agents
+### Tools
 
-### `thread()` — the composable primitive
+Return `ToolResult { output, error, ok, exitCode }`. Never throw.
 
-`thread()` creates a lazy spec you can store, pass around, and dispatch. The sub-agent doesn't start until consumed.
+| Builtin | Description |
+|---------|-------------|
+| `read({ path })` | Read a file |
+| `edit({ path, oldText, newText })` | Replace exact text |
+| `write({ path, content })` | Create or overwrite |
+| `bash({ command, timeout? })` | Run shell command |
+| `grep({ pattern, path })` | Search with ripgrep |
+| `find({ pattern, path })` | Find files by glob |
+| `ls({ path })` | List directory |
 
-```javascript
-// Build tasks programmatically from data
-files = [...(await load("src/")).keys()].filter(f => f.endsWith(".ts"))
-tasks = files.map(f => thread(`Review ${f} for security issues`, { name: f }))
-results = await dispatch(tasks)
+### File I/O
 
-// Structured results
-critical = results.flatMap(ep => ep.findings).filter(f => /critical/i.test(f))
-totalCost = results.reduce((s, r) => s + r.cost, 0)
+| Builtin | Description |
+|---------|-------------|
+| `load(path)` | File → string, directory → `Map<path, content>` |
+| `save(path, content)` | Write without entering agent context |
+
+### Workers
+
+| Builtin | Description |
+|---------|-------------|
+| `spawn(task, opts?)` | Spawn async worker → `WorkerHandle` |
+| `h.status` | `"running"` \| `"done"` \| `"crashed"` |
+| `h.result` | `Promise<WorkerResult>` |
+| `h.branch` | Git branch (e.g. `"spindle/w0"`) |
+| `h.worktree` | Worktree path |
+| `h.session` | Tmux session name |
+| `h.cancel()` | Kill the worker |
+
+**SpawnOptions:** `{ agent?, model?, tools?, timeout?, worktree?, name?, systemPromptSuffix? }`
+
+**WorkerResult:** `{ status, summary, findings[], artifacts[], blockers[], branch, worktree, exitCode, turns, toolCalls, cost, model, durationMs }`
+
+### LLM
+
+| Builtin | Description |
+|---------|-------------|
+| `llm(prompt, opts?)` | Blocking one-shot → `{ text, cost, model, turns, ok }` |
+
+**Options:** `{ agent?, model?, tools?, timeout?, maxOutput? }`
+
+### MCP
+
+| Builtin | Description |
+|---------|-------------|
+| `mcp()` | List MCP servers |
+| `mcp('server')` | List tools for a server |
+| `mcp_call(server, tool, args)` | One-shot tool call |
+| `mcp_connect(server)` | Persistent proxy |
+| `mcp_disconnect(server?)` | Close connections |
+
+### Utilities
+
+| Builtin | Description |
+|---------|-------------|
+| `sleep(ms)` | Async delay |
+| `diff(a, b, opts?)` | Unified diff |
+| `retry(fn, opts?)` | Exponential backoff |
+| `vars()` | List REPL variables |
+| `clear(name?)` | Free a variable |
+| `help()` | Show all builtins |
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/spindle attach <id>` | Open worker's tmux session |
+| `/spindle list` | Show active workers |
+| `/spindle reset` | Reset REPL state |
+| `/spindle config subModel <model>` | Set default worker model |
+| `/spindle status` | Show REPL state |
+
+## Patterns
+
+### Parallel review
+
+```js
+files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))
+workers = files.map(f => spawn(`Review ${f} for bugs`, { agent: 'reviewer' }))
+results = await Promise.all(workers.map(w => w.result))
+bugs = results.filter(r => r.status === 'failure')
 ```
 
-### `llm()` — convenience for one-shots
+### Spawn and continue
 
-```javascript
-ep = await llm("Summarize the auth module")
-console.log(ep.summary)
+```js
+// Spawn a worker
+h = spawn("Add comprehensive tests for the parser")
+
+// Keep working on something else
+await edit({ path: "src/parser.ts", oldText: "old", newText: "new" })
+await bash({ command: "npm run lint -- --fix" })
+
+// Come back later
+r = await h.result
+await bash({ command: `git merge ${h.branch}` })
 ```
 
-### `dispatch()` — parallel execution
+### LLM one-shot
 
-Run threads when work is genuinely independent. If step 2 depends on step 1, use sequential calls instead.
-
-```javascript
-// Round 1: Explore
-scouts = dirs.map(d => thread(`Analyze src/${d}/ for deprecated APIs`, { name: d }))
-round1 = await dispatch(scouts)
-
-// Round 2: Fix only what needs fixing
-needsWork = round1.filter(ep => ep.findings.length > 0)
-fixes = needsWork.map(ep =>
-    thread(`Fix deprecated APIs. Findings: ${ep.findings.join("; ")}`, { name: `fix-${ep.name}` })
-)
-round2 = await dispatch(fixes)
+```js
+summary = await llm("Summarize this in 3 bullet points: " + await load("README.md"))
+console.log(summary.text)
 ```
 
-### Stepped threads
+## Requirements
 
-Watch a long-running agent work:
+- **tmux** — required for async workers
+- **git** — required for worktree isolation (falls back to cwd without git)
+- **pi** — the coding agent
 
-```javascript
-for await (const ep of thread("Refactor auth module", { stepped: true })) {
-    console.log(`[${ep.status}] ${ep.summary.slice(0, 80)}`)
-    if (ep.status !== "running") break
-}
-```
+## How it works
 
-### Thread communication
+1. `spawn()` creates a git worktree (`.worktrees/<id>`) and a tmux session (`spindle-<id>`)
+2. A pi process runs in the tmux session with a worker extension that writes `.spindle/status.json`
+3. The main session polls status files every 2s to update the dashboard widget
+4. When a worker finishes, `pi.sendMessage()` notifies the main agent
+5. The agent collects results via `await handle.result` and merges branches
 
-Threads can exchange messages and synchronize via barriers when needed:
-
-```javascript
-results = await dispatch([
-    thread("Define types, then broadcast to the team", { spindle: true }),
-    thread("Wait for types from rank 0, then implement the API", { spindle: true }),
-    thread("Wait for types from rank 0, then write the tests", { spindle: true }),
-], { communicate: true })
-```
-
-## Spawn Depth Limits
-
-Sub-agents with `{ spindle: true }` can dispatch further sub-agents. Recursion is capped at a configurable depth (default: 3) to prevent runaway spawning.
-
-```javascript
-thread("complex task", { spindle: true, maxDepth: 5 })  // override for a sub-tree
-```
-
-Configure: `/spindle config maxDepth <N>` or `SPINDLE_MAX_DEPTH` env var.
-
-## Script Plans
-
-Workflows as `.spindle.js` files — real JavaScript that runs in the REPL. Paired with a companion `.md` for design rationale.
-
-```javascript
-// refactor-auth.spindle.js
-
-// Phase 1: Create shared types
-ep = await llm("Create shared interfaces in src/types.ts", { name: "types" })
-if (ep.status !== "success") { console.log("Failed:", ep.summary); return }
-await bash({ command: "npm test" })
-
-// Phase 2: Update consumers in parallel
-dirs = (await ls({ path: "src/" })).output.split("\n")
-    .filter(d => d.endsWith("/")).map(d => d.slice(0, -1))
-tasks = dirs.map(d => thread(`Update src/${d}/ to use new types`, { name: d }))
-results = await dispatch(tasks)
-```
-
-```bash
-spindle lint refactor-auth.spindle.js   # catch errors before spending money
-spindle run refactor-auth.spindle.js    # lint then execute via pi
-spindle new refactor-auth               # scaffold a new plan
-```
-
-## Pi Commands
-
-| Command | Purpose |
-|---|---|
-| `/spindle run <file.spindle.js>` | Execute a script plan in the REPL |
-| `/spindle <task>` | Prime the model for orchestration |
-| `/spindle reset` | Fresh REPL context |
-| `/spindle config subModel <model>` | Set default sub-agent model |
-| `/spindle config maxDepth <N>` | Set max spawn depth (default: 3) |
-| `/spindle status` | Show variables, usage, config |
-
-## Skills
-
-Three skills bundled and auto-discovered:
-
-**`repl`** — Core REPL usage: builtins, MCP, sub-agents, depth limits. Start here. References drill into sub-agent patterns, common recipes, and advanced topics.
-
-**`mcp`** — MCP server discovery and tool calls.
-
-**`work`** — Autonomous plan execution. Takes a plan, parses tasks, loops sub-agents over them. References cover patterns: ralph loops, ralph-critic, implementer-critic, autoresearch.
-
-## Documentation
-
-- **[API Reference](docs/api.md)** — built-in tools, MCP, sub-agents, threads, episodes
-- **[Architecture](docs/architecture.md)** — source layout and design decisions
-- **[Examples](docs/examples.md)** — security audit, MCP orchestration, coordinated research, stepped threads
+Workers are fully isolated — they have their own filesystem (worktree), their own terminal (tmux), and their own pi process. No shared state, no message passing, no coordination needed.
 
 ## License
 

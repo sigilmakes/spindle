@@ -18,7 +18,7 @@ maxAttempts = 5
 feedback = ""
 
 // Save checkpoint — reset to this on any revert
-checkpoint = (await bash({ command: "git rev-parse HEAD" })).stdout.trim()
+checkpoint = (await bash({ command: "git rev-parse HEAD" })).output.trim()
 
 // === Loop ===
 for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -32,8 +32,8 @@ Implement this. Run tests. Make exactly one commit when done.`, {
         name: `impl-${attempt}`
     })
 
-    if (impl.status !== "success") {
-        console.log(`❌ Implementation failed: ${impl.summary}`)
+    if (!impl.ok) {
+        console.log(`❌ Implementation failed`)
         await bash({ command: `git reset --hard ${checkpoint}` })
         continue
     }
@@ -51,21 +51,20 @@ Evaluate:
 - Is the code clean and tested?
 - Any security or performance concerns?
 
-Status SUCCESS = you would merge this. No reservations.
-Status FAILURE = needs work. List every issue in findings.`, {
+If you would merge this as-is, say APPROVED.
+If it needs work, say REJECTED and list every specific issue.`, {
         name: `review-${attempt}`
     })
 
-    if (review.status === "success") {
+    if (review.text.includes("APPROVED")) {
         console.log(`✅ Approved after ${attempt + 1} attempt(s)`)
-        console.log(`Summary: ${impl.summary}`)
         break
     }
 
-    feedback = review.findings.join("\n")
+    feedback = review.text
     console.log(`🔄 Rejected (${attempt + 1}/${maxAttempts}): ${feedback.slice(0, 200)}`)
 
-    // Reset to checkpoint — handles any number of commits cleanly
+    // Reset to checkpoint
     await bash({ command: `git reset --hard ${checkpoint}` })
 
     if (attempt === maxAttempts - 1) {
@@ -84,5 +83,5 @@ Status FAILURE = needs work. List every issue in findings.`, {
 ## Gotchas
 
 - **The goal must be specific.** "Make the auth better" will loop forever. "Add rate limiting to the login endpoint, max 5 attempts per minute per IP" converges.
-- **Feedback replaces, not accumulates.** Each rejection gives the implementer only the latest review's feedback. For a single goal this is usually fine — the reviewer sees the same diff each time. But if the implementer fixes issue A and introduces issue B, the feedback for B won't mention A. If this is a problem, accumulate: `feedback += "\n" + review.findings.join("\n")`.
-- **Don't loop forever.** 5 attempts is generous. If it hasn't converged by then, the task needs to be broken down or the approach rethought.
+- **Feedback replaces, not accumulates.** Each rejection gives the implementer only the latest review. If the implementer fixes issue A and introduces issue B, feedback for B won't mention A. If this is a problem, accumulate.
+- **Don't loop forever.** 5 attempts is generous. If it hasn't converged by then, the task needs to be broken down.

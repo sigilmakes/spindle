@@ -1,14 +1,13 @@
 {
   "name": "spindle",
-  "version": "0.1.0",
-  "description": "Agent orchestration extension for pi",
+  "version": "0.2.0",
+  "description": "Async agent orchestration extension for pi",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "lint-plan": "node bin/lint-plan.mjs"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.58.1",
@@ -33,9 +32,5 @@
   },
   "keywords": [
     "pi-package"
-  ],
-  "bin": {
-    "spindle": "./bin/spindle.mjs",
-    "lint-plan": "./bin/lint-plan.mjs"
-  }
+  ]
 }

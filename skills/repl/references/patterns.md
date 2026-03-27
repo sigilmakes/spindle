@@ -1,128 +1,95 @@
-# REPL Patterns & Recipes
+# Orchestration Patterns
 
-Common workflows, gotchas, and session hygiene for the Spindle REPL.
+## Data-driven parallelism
 
-## The Fundamental Pattern: Load Once, Query Many
+Discover targets programmatically, spawn workers from the list:
 
-This is why the REPL is better than raw tool calls. Load a directory into a variable, then slice it any way you need — no more tool calls, no context waste.
+```js
+// Find modules → spawn reviewers
+modules = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))
+workers = modules.map(f => spawn(`Review ${f} for bugs and style issues`))
 
-```javascript
-// Call 1: Load the codebase
-src = await load("src/")
-console.log(`${src.size} files loaded`)
+// Collect all results
+results = await Promise.all(workers.map(w => w.result))
 
-// Call 2: Find all exported functions
-exports = [...src.entries()].flatMap(([file, content]) => {
-    return [...content.matchAll(/export (?:async )?function (\w+)/g)]
-        .map(m => ({ file, fn: m[1] }))
-})
-console.log(`${exports.length} exported functions`)
-
-// Call 3: Find unused exports (no re-reading, no tool calls)
-unused = exports.filter(({ fn, file }) => {
-    return ![...src.entries()].some(([f, c]) => f !== file && c.includes(fn))
-})
+// Filter and act
+bugs = results.filter(r => r.findings.some(f => f.includes('bug')))
+clean = results.filter(r => r.status === 'success' && r.blockers.length === 0)
 ```
 
-Each call builds on previous variables. The `src` Map stays in memory across calls. You can `grep` it, count lines, extract patterns, cross-reference — all in JS, all instant.
+## Pipeline: analyze then fix
 
-### Common Map Operations
+Use `llm()` for analysis, `spawn()` for implementation:
 
-```javascript
-src = await load("src/")
+```js
+// Phase 1: analyze (blocking — quick, no worktree needed)
+code = [...(await load('src/')).entries()].map(([k, v]) => `// ${k}\n${v}`).join('\n')
+plan = await llm(`Identify the top 3 refactoring opportunities:\n${code}`)
 
-// File sizes
-[...src.entries()]
-    .map(([path, content]) => ({ path, lines: content.split("\n").length }))
-    .sort((a, b) => b.lines - a.lines)
-
-// Just file names
-[...src.keys()]
-
-// Filter by extension
-[...src.keys()].filter(f => f.endsWith(".test.ts"))
-
-// Search content
-[...src.entries()].filter(([_, c]) => c.includes("deprecated"))
-
-// Build a dependency graph
-[...src.entries()].map(([file, content]) => ({
-    file,
-    imports: [...content.matchAll(/from ['"]\.\/(.*?)['"]/g)].map(m => m[1])
-}))
+// Phase 2: implement (async — each in its own worktree)
+tasks = plan.text.split('\n').filter(l => l.match(/^\d/))
+workers = tasks.map(t => spawn(t))
 ```
 
-## ToolResult Gotchas
+## Spawn and continue
 
-All builtins (`grep`, `find`, `ls`, `read`, `bash`, etc.) return `ToolResult { output, error, ok, exitCode }`.
+The main agent doesn't block — it keeps working while workers run:
 
-**Empty lines.** `.output.split("\n")` almost always has a trailing empty string. Chain `.filter(Boolean)`:
+```js
+// Call 1: spawn
+h = spawn("Add comprehensive tests for the parser")
 
-```javascript
-// ✗ Last element is ""
-hits.output.split("\n")
+// Call 2: agent does other work with normal tools
+// (read, edit, bash — outside the REPL)
 
-// ✓ Clean array
-hits.output.split("\n").filter(Boolean)
-```
-
-**Errors go to `.error`, not `.output`.** A failed grep returns an empty `.output`. Check `.ok` first:
-
-```javascript
-result = await bash({ command: "npm test" })
-if (!result.ok) {
-    console.log("Failed:", result.error)
-} else {
-    console.log(result.output)
+// Call 3: collect when ready
+r = await h.result
+if (r.status === "success") {
+    await bash({ command: `git merge ${h.branch}` })
 }
 ```
 
-**String coercion.** `${result}` and `console.log(result)` print `.output` on success, or `.output + .error` on failure. Usually fine for quick inspection, but parse `.output` explicitly when you need structure.
+## Selective collection
 
-## Variable Hygiene
+Don't wait for everything — collect as results arrive:
 
-Bare assignments persist *everything*. In a long session with multiple `load()` calls, memory adds up.
+```js
+workers = [
+    spawn("Fast: lint fixes"),
+    spawn("Slow: full refactor"),
+    spawn("Medium: update docs"),
+]
 
-```javascript
-// After you're done with a big dataset
-clear("src")          // free the Map
-clear("results")      // free the episode array
-
-// Check what's lingering
-vars()                // lists all persistent variables with type and preview
+// Poll for completion
+while (workers.some(w => w.status === "running")) {
+    await sleep(5000)
+    for (const w of workers) {
+        if (w.status === "done") {
+            console.log(`${w.id} finished`)
+        }
+    }
+}
 ```
 
-**Rule of thumb:** `clear()` any variable over ~1MB when you're done with it. `load()` of a large directory can easily be 5-10MB.
+## Using pre-defined agents
 
-## Incremental Exploration
+Agents in `~/.pi/agent/agents/*.md` can be referenced by name:
 
-Don't load the whole project on the first call. Start narrow, widen as needed.
-
-```javascript
-// Start with structure
-entries = await ls({ path: "src/" })
-
-// Read the entry point
-main = await load("src/index.ts")
-
-// Only load subdirs you actually need
-auth = await load("src/auth/")
+```js
+// scout.md has tools: read, grep, find, ls and model: haiku
+h = spawn("Find all deprecated API usages", { agent: "scout" })
 ```
 
-This is cheaper on memory and helps you focus. Load the world only when you need to cross-reference across the whole codebase.
+## Error handling
 
-## Combining Builtins With Load
-
-`grep()` and `find()` are fast for initial discovery. `load()` is better for repeated analysis. Use them together:
-
-```javascript
-// grep to find which files matter
-hits = await grep({ pattern: "TODO|FIXME", path: "src/" })
-todoFiles = [...new Set(hits.output.split("\n").map(l => l.split(":")[0]).filter(Boolean))]
-
-// load just those files for deeper analysis
-for (const f of todoFiles) {
-    content = await load(f)
-    // ... extract, count, categorize
+```js
+r = await h.result
+if (r.status === "failure") {
+    console.log("Failed:", r.summary)
+    if (r.blockers.length > 0) {
+        console.log("Blockers:", r.blockers.join(", "))
+    }
+    // Worktree is preserved — can inspect the partial work
+    console.log("Inspect:", h.worktree)
 }
 ```

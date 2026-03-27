@@ -17,6 +17,14 @@ import { discoverAgents, resolveAgent, getExtensionDir } from "./agents.js";
 
 export type WorkerStatus = "running" | "done" | "crashed";
 
+export interface WorkerEpisode {
+    status: "success" | "failure" | "blocked";
+    summary: string;
+    findings: string[];
+    artifacts: string[];
+    blockers: string[];
+}
+
 export interface WorkerStatusFile {
     status: WorkerStatus;
     currentTool?: string;
@@ -29,12 +37,16 @@ export interface WorkerStatusFile {
     model?: string;
     exitCode?: number;
     summary?: string;
+    episode?: WorkerEpisode;
     lastUpdate: number;
 }
 
 export interface WorkerResult {
     status: "success" | "failure";
     summary: string;
+    findings: string[];
+    artifacts: string[];
+    blockers: string[];
     branch: string;
     worktree: string;
     exitCode: number;
@@ -338,6 +350,9 @@ class WorkerHandleImpl implements WorkerHandle {
         this._resolve({
             status: "failure",
             summary: "Cancelled by user",
+            findings: [],
+            artifacts: [],
+            blockers: [],
             branch: this.branch,
             worktree: this.worktree,
             exitCode: -1,
@@ -423,6 +438,9 @@ export function killAllWorkers(): void {
             handle._resolve({
                 status: "failure",
                 summary: "Session ended — worker killed",
+                findings: [],
+                artifacts: [],
+                blockers: [],
                 branch: handle.branch,
                 worktree: handle.worktree,
                 exitCode: -1,

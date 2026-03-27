@@ -1,77 +1,72 @@
-# Advanced Spindle
+# Advanced Usage
 
-Thread communication, file locking, output limits, and recursive sub-agents.
+## REPL internals
 
-## Thread Communication
+The REPL runs code in a Node.js `vm.Context`. Top-level `const`/`let`/`var` declarations are hoisted to bare assignments so they persist across `spindle_exec` calls.
 
-All `dispatch()` threads can exchange messages. Each thread gets a rank (0-indexed). Communication tools are always available — no opt-in needed.
+```js
+// Call 1
+const x = 42
+// Internally transformed to: x = 42
 
-```javascript
-results = await dispatch([
-    thread("Define types, then broadcast to team", { spindle: true }),
-    thread("Wait for types from rank 0, then implement", { spindle: true }),
-])
+// Call 2
+x  // → 42  (persists on the vm context)
 ```
 
-Available tools inside dispatch threads:
+File execution (`spindle_exec({ file: "path.js" })`) skips hoisting — declarations keep their normal scoping.
 
-| Tool | Purpose |
-|------|---------|
-| `spindle_send({ to: 1, msg: "done", data: {...} })` | Point-to-point message |
-| `spindle_recv({ from: 0 })` | Blocking receive (optional `from` filter) |
-| `spindle_broadcast({ msg: "update" })` | Send to all other threads |
-| `spindle_barrier({ name: "phase1" })` | Block until all threads arrive |
+## ToolResult
 
-### Barriers
+All tool wrappers return `ToolResult`:
 
-Synchronize a subset of threads at a named point:
+```js
+const r = await bash({ command: "npm test" })
+r.output    // stdout
+r.error     // stderr
+r.ok        // exitCode === 0
+r.exitCode  // raw exit code
 
-```javascript
-results = await dispatch([
-    thread("Write types. Call spindle_barrier({name:'types', count:2}). Then implement API."),
-    thread("Write fixtures. Call spindle_barrier({name:'types', count:2}). Then run tests."),
-    thread("Wait for done messages. Do NOT call the barrier."),
-])
+// ToolResult coerces to string
+`${r}`  // → r.output
 ```
 
-`count` specifies how many threads must arrive before the barrier releases. Only participating threads should call it — threads that don't participate must not call the barrier or it will deadlock. If `count` is omitted it defaults to the total thread count.
+Tool wrappers never throw. Errors are always captured in the result.
 
-## File Locking
+## load() and save()
 
-`edit`, `write`, and `save` automatically acquire cross-process file locks. If a file is locked, the call waits up to 10 seconds then fails with `FileLockError`. Lock acquire/release events are broadcast to all threads.
+`load()` bypasses the agent's context window — reads directly into the REPL:
 
-**Rule:** Dispatch threads should target non-overlapping files. Use barriers to sequence access to shared files when overlap is unavoidable.
+```js
+// Single file → string
+content = await load("src/parser.ts")
 
-## File Collision Detection
-
-When multiple dispatch threads write the same file, Spindle detects the collision and adds a warning to the affected threads. This is advisory — it doesn't prevent the write, but surfaces the conflict in `episode.warnings` so you can handle it.
-
-```javascript
-results = await dispatch([...])
-collisions = results.filter(ep => ep.warnings?.length)
-collisions.forEach(ep => console.log(`${ep.name}: ${ep.warnings.join(", ")}`))
+// Directory → Map<relativePath, content>
+files = await load("src/")
+[...files.entries()].filter(([k, v]) => v.includes("TODO"))
 ```
 
-## Output Limits
+`save()` writes without entering context:
 
-| What | Limit | Behavior |
-|------|-------|----------|
-| REPL console output | 8192 chars | Truncated — store in variables instead |
-| `episode.output` | 50KB | Head+tail preserved, middle truncated |
-| `llm()` return | 50KB default | Set `maxOutput: false` to disable |
-| Dispatch aggregate | 100MB warning | Logged but not enforced |
-
-Truncation is destructive. If you see `[truncated]`, either use the structured fields (`summary`, `findings`) or re-run with `{ maxOutput: false }`.
-
-## Recursive Spindle
-
-Pass `{ spindle: true }` to give a sub-agent its own Spindle REPL. It can call `load()`, `dispatch()`, run scripts — the full API.
-
-```javascript
-results = await dispatch([
-    thread("Refactor auth module", { spindle: true }),
-    thread("Refactor API layer", { spindle: true }),
-])
+```js
+await save("report.json", JSON.stringify(data, null, 2))
 ```
 
-Use this for complex tasks where the sub-agent benefits from its own orchestration layer — loading files into variables, running multiple analysis passes, or spawning its own sub-agents.
+## MCP
+
+```js
+// Discover
+await mcp()                    // list servers
+await mcp("context7")          // list tools
+await mcp("context7", { schema: true })  // include param schemas
+
+// One-shot call
+r = await mcp_call("context7", "resolve", { query: "react hooks" })
+
+// Persistent proxy
+proxy = await mcp_connect("context7")
+await mcp_disconnect("context7")
+```
+
+## Session persistence
+
+REPL config (sub-model) persists across pi session restarts via `pi.appendEntry()`. Variables and worker handles do not persist — they exist only in the current session's REPL.

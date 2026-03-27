@@ -3,7 +3,6 @@ import { highlightCode, type Theme } from "@mariozechner/pi-coding-agent";
 
 export interface SpindleExecDetails {
     code: string;
-    file?: string;
     durationMs?: number;
     error?: boolean;
 }
@@ -27,10 +26,6 @@ export function formatCodeForDisplay(code: string, theme: Theme): string {
         text += "  " + line + "\n";
     }
     return text.trimEnd();
-}
-
-export function formatFileExecForDisplay(file: string, theme: Theme): string {
-    return theme.fg("toolTitle", theme.bold("spindle_exec")) + " " + theme.fg("accent", file);
 }
 
 export function formatExecResult(

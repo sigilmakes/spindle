@@ -24,7 +24,7 @@ for (const task of tasks) {
     console.log(`\n--- Task ${task.id}: ${task.description} ---`)
 
     // Save checkpoint for clean revert
-    checkpoint = (await bash({ command: "git rev-parse HEAD" })).stdout.trim()
+    checkpoint = (await bash({ command: "git rev-parse HEAD" })).output.trim()
 
     ep = await llm(`You are working in ${process.cwd()}.
 
@@ -37,16 +37,15 @@ Implement this task. Run relevant tests. Commit when done.`, {
         name: `task-${task.id}`,
     })
 
-    if (ep.status === "success") {
-        progress += `\n- ${task.description}: ${ep.summary}`
+    if (ep.ok) {
+        progress += `\n- ${task.description}: ${ep.text.slice(0, 200)}`
         task.done = true
         await save(".pi/work-tasks.json", JSON.stringify(tasks, null, 2))
         await bash({ command: `git add -A && git diff --cached --quiet || git commit -m "feat: ${task.description.slice(0, 50)}"` })
         console.log(`✅ Done: ${task.description}`)
     } else {
         console.log(`❌ Failed: ${task.description}`)
-        console.log(`   ${ep.summary}`)
-        progress += `\n- ${task.description}: FAILED — ${ep.summary}`
+        progress += `\n- ${task.description}: FAILED`
         await bash({ command: `git reset --hard ${checkpoint}` })
         console.log("Stopping — task failed. Review and restart.")
         break
@@ -68,23 +67,24 @@ The task file is the source of truth for what's done — it survives crashes.
 
 ## Parallelism
 
-The loop above is sequential. For truly independent tasks — different files, no shared state — you can `dispatch()` them in parallel:
+For independent tasks — different files, no shared state — use `spawn()` to run them in parallel on separate worktrees:
 
 ```javascript
-// Only for tasks that are completely file-disjoint
 independent = tasks.filter(t => !t.done && t.parallel)
-specs = independent.map(t => thread(`Task: ${t.description}`, { name: `task-${t.id}` }))
-results = await dispatch(specs)
+workers = independent.map(t => spawn(`Task: ${t.description}`, { name: `task-${t.id}` }))
+results = await Promise.all(workers.map(w => w.result))
+
+// Merge successful ones
+for (let i = 0; i < workers.length; i++) {
+    if (results[i].status === "success") {
+        await bash({ command: `git merge ${workers[i].branch}` })
+        independent[i].done = true
+    }
+}
+await save(".pi/work-tasks.json", JSON.stringify(tasks, null, 2))
 ```
 
-**Be very cautious with this.** Naive parallelism causes real problems:
-
-- **Git state is shared.** Parallel agents committing to the same branch will clash.
-- **File conflicts.** Two agents editing the same file — or files that import each other — will silently clobber each other's work.
-- **Progress context breaks.** Parallel agents can't see each other's changes, so the rolling progress string becomes meaningless.
-- **Test interference.** Parallel test runs may share databases, ports, or temp files.
-
-If you want parallel execution, consider **git worktrees** — each agent gets its own working directory on a separate branch, then you merge. But that's significantly more orchestration. Default to sequential unless you've verified the tasks are truly isolated.
+Each worker gets its own git worktree — no file conflicts, no git clashes.
 
 ## Gotchas
 

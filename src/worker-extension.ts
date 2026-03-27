@@ -1,12 +1,13 @@
 /**
  * Worker Extension — loaded by pi subagent processes spawned by spindle.
  *
- * Hooks pi lifecycle events and writes structured status to
- * .spindle/status.json in the working directory. The main session's
- * poller reads these files to drive the dashboard and notifications.
- *
- * Calls ctx.shutdown() when the agent finishes so the process exits
- * cleanly instead of waiting for user input.
+ * 1. Injects episode prompt via before_agent_start so the agent writes
+ *    a structured <episode> block at the end of its response.
+ * 2. Hooks pi lifecycle events and writes structured status to
+ *    .spindle/status.json in the working directory.
+ * 3. Parses the <episode> block from agent_end and includes it in the
+ *    status file so the orchestrator gets structured results.
+ * 4. Calls ctx.shutdown() when the agent finishes.
  */
 
 import * as fs from "node:fs";
@@ -15,6 +16,31 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const STATUS_DIR = ".spindle";
 const STATUS_FILE = "status.json";
+
+const EPISODE_PROMPT = `
+After completing your task, end your response with a structured episode block.
+This block MUST be the last thing in your response.
+
+<episode>
+status: success | failure | blocked
+summary: One paragraph describing what you accomplished and key conclusions.
+findings:
+- Finding or deliverable 1
+- Finding or deliverable 2
+artifacts:
+- path/to/file — what was created or modified
+blockers:
+- (only if status is blocked) What's preventing progress
+</episode>
+`.trim();
+
+interface Episode {
+    status: "success" | "failure" | "blocked";
+    summary: string;
+    findings: string[];
+    artifacts: string[];
+    blockers: string[];
+}
 
 interface StatusData {
     status: "running" | "done" | "crashed";
@@ -28,7 +54,32 @@ interface StatusData {
     model?: string;
     exitCode?: number;
     summary?: string;
+    episode?: Episode;
     lastUpdate: number;
+}
+
+function parseEpisodeBlock(text: string): Episode | null {
+    // Grab the LAST <episode> block (agent may quote the template)
+    const allMatches = [...text.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
+    if (allMatches.length === 0) return null;
+
+    const block = allMatches[allMatches.length - 1][1];
+    const statusMatch = block.match(/status:\s*(success|failure|blocked)/i);
+    const summaryMatch = block.match(/summary:\s*(.+?)(?=\nfindings:|\nartifacts:|\nblockers:|\n*$)/is);
+
+    return {
+        status: (statusMatch?.[1]?.toLowerCase() as Episode["status"]) || "success",
+        summary: summaryMatch?.[1]?.trim() || "",
+        findings: parseList(block, "findings"),
+        artifacts: parseList(block, "artifacts"),
+        blockers: parseList(block, "blockers"),
+    };
+}
+
+function parseList(block: string, field: string): string[] {
+    const match = block.match(new RegExp(`${field}:\\s*\\n((?:\\s*-\\s*.+\\n?)*)`, "i"));
+    if (!match) return [];
+    return match[1].split("\n").map(line => line.replace(/^\s*-\s*/, "").trim()).filter(Boolean);
 }
 
 export default function workerExtension(pi: ExtensionAPI) {
@@ -54,6 +105,13 @@ export default function workerExtension(pi: ExtensionAPI) {
         }
     }
 
+    // Inject the episode prompt so the agent writes structured output
+    pi.on("before_agent_start", async (event) => {
+        return {
+            systemPrompt: (event.systemPrompt || "") + "\n\n" + EPISODE_PROMPT,
+        };
+    });
+
     pi.on("session_start", async (_event, ctx) => {
         cwd = ctx.cwd;
         writeStatus();
@@ -61,7 +119,6 @@ export default function workerExtension(pi: ExtensionAPI) {
 
     pi.on("tool_execution_start", async (event) => {
         status.currentTool = event.toolName;
-        // Extract a useful preview from args
         const args = event.args as Record<string, unknown>;
         if (event.toolName === "bash") {
             const cmd = (args.command as string) || "";
@@ -94,23 +151,26 @@ export default function workerExtension(pi: ExtensionAPI) {
     });
 
     pi.on("agent_end", async (event, ctx) => {
-        // Extract summary from the last assistant message
-        let summary = "";
+        // Extract the last assistant text and parse the episode block
+        let lastText = "";
         const messages = event.messages || [];
         for (let i = messages.length - 1; i >= 0; i--) {
             const msg = messages[i] as any;
             if (msg.role === "assistant") {
                 for (const part of msg.content || []) {
                     if (part.type === "text") {
-                        summary = part.text;
+                        lastText = part.text;
                         break;
                     }
                 }
-                if (summary) break;
+                if (lastText) break;
             }
         }
 
-        // Truncate summary to something reasonable
+        const episode = parseEpisodeBlock(lastText);
+
+        // Use episode summary if available, otherwise fall back to raw text
+        let summary = episode?.summary || lastText;
         if (summary.length > 2000) {
             summary = summary.slice(0, 2000) + "...";
         }
@@ -119,16 +179,15 @@ export default function workerExtension(pi: ExtensionAPI) {
         status.exitCode = 0;
         status.endTime = Date.now();
         status.summary = summary;
+        status.episode = episode || undefined;
         status.currentTool = undefined;
         status.currentArgs = undefined;
         writeStatus();
 
-        // Exit the process cleanly
         ctx.shutdown();
     });
 
     pi.on("session_shutdown", async () => {
-        // If we haven't written a "done" status, mark as crashed
         if (status.status === "running") {
             status.status = "crashed";
             status.exitCode = 1;

@@ -51,9 +51,15 @@ function tmuxSessionExists(session: string): boolean {
 }
 
 function buildResult(handle: WorkerHandle, sf: WorkerStatusFile): WorkerResult {
+    const episode = sf.episode;
     return {
-        status: sf.exitCode === 0 ? "success" : "failure",
-        summary: sf.summary || "",
+        status: episode?.status === "success" ? "success"
+            : episode?.status === "blocked" ? "failure"
+            : sf.exitCode === 0 ? "success" : "failure",
+        summary: episode?.summary || sf.summary || "",
+        findings: episode?.findings || [],
+        artifacts: episode?.artifacts || [],
+        blockers: episode?.blockers || [],
         branch: handle.branch,
         worktree: handle.worktree,
         exitCode: sf.exitCode ?? -1,
@@ -97,6 +103,9 @@ function pollOnce(): void {
             const result: WorkerResult = {
                 status: "failure",
                 summary: "Worker process died without writing status",
+                findings: [],
+                artifacts: [],
+                blockers: [],
                 branch: handle.branch,
                 worktree: handle.worktree,
                 exitCode: -1,
