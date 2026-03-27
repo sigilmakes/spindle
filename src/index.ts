@@ -58,9 +58,12 @@ export default function spindle(pi: ExtensionAPI) {
             return;
         }
 
+        // Render once with current theme, pass as string array (no factory, no repeated renders)
+        const theme = widgetUi.theme;
+        if (!theme) return;
+        const widget = renderDashboard(subs, theme);
         try {
-            // Factory form: receives (tui, theme) from pi, so we always use the current theme
-            widgetUi.setWidget("spindle-subagents", (_tui: any, theme: Theme) => renderDashboard(subs, theme));
+            widgetUi.setWidget("spindle-subagents", (_tui: any, _theme: any) => widget);
         } catch {}
 
         // Auto-clear after all done
