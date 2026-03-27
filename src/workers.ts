@@ -322,6 +322,10 @@ class SubagentHandleImpl implements SubagentHandle {
     private _resolveResult!: (result: AgentResult) => void;
     private _resolved = false;
 
+    /** Grace period (ms) before we start checking if the pane process is alive.
+     *  Needed because tmux send-keys hasn't launched pi yet when the poller first runs. */
+    static readonly STARTUP_GRACE_MS = 15_000;
+
     constructor(
         id: string, task: string, session: string,
         statusDir: string, branch?: string, worktree?: string,
@@ -336,6 +340,11 @@ class SubagentHandleImpl implements SubagentHandle {
         this._result = new Promise<AgentResult>((resolve) => {
             this._resolveResult = resolve;
         });
+    }
+
+    /** Whether the startup grace period has elapsed. */
+    get pastGrace(): boolean {
+        return Date.now() - this.startTime > SubagentHandleImpl.STARTUP_GRACE_MS;
     }
 
     get status(): SubagentStatus {

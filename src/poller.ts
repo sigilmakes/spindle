@@ -88,9 +88,11 @@ function pollOnce(): void {
             (handle as any)._resolve(result);
             pollerCallbacks?.onDone(handle, result);
             anyChanged = true;
-        } else if (!isTmuxPaneAlive(handle.session)) {
+        } else if ((handle as any).pastGrace && !isTmuxPaneAlive(handle.session)) {
             // Pi process is dead (session gone or fell back to shell)
-            // but status file never got a terminal status — treat as crash
+            // but status file never got a terminal status — treat as crash.
+            // Only check after the startup grace period so we don't false-positive
+            // before pi has even launched from tmux send-keys.
             const result = sf
                 ? buildResult(handle, { ...sf, status: "crashed", exitCode: -1, endTime: Date.now() })
                 : crashResult(handle);
