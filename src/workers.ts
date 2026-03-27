@@ -96,6 +96,16 @@ export interface SubagentHandle {
 let counter = 0;
 const active = new Map<string, SubagentHandleImpl>();
 
+/** Find the next available ID that doesn't collide with existing tmux sessions. */
+function nextId(): string {
+    while (true) {
+        const id = `w${counter++}`;
+        const session = `spindle-${id}`;
+        if (!tmuxSessionExists(session)) return id;
+        // Session exists from a previous run — skip it
+    }
+}
+
 export interface SubagentCallbacks {
     onStatusChange?: (handle: SubagentHandle) => void;
     onDone?: (handle: SubagentHandle, result: AgentResult) => void;
@@ -353,7 +363,7 @@ export function subagent(
         throw new Error("tmux is required for subagents. Install tmux and try again.");
     }
 
-    const id = `w${counter++}`;
+    const id = nextId();
     const sessionName = `spindle-${id}`;
     const useWorktree = opts.worktree === true;
 
