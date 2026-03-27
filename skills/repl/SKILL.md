@@ -1,5 +1,5 @@
 ---
-name: spindle-repl
+name: repl
 description: Persistent JavaScript REPL for orchestration — async subagents in tmux sessions, file I/O, tool wrappers, MCP. Use when chaining operations, spawning parallel agents, or transforming data programmatically.
 ---
 
