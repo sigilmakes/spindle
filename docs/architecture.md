@@ -32,7 +32,9 @@ pi (main session)
 | `worker-extension.ts` | Pi extension loaded by subagents. Writes status files, parses episodes. |
 | `poller.ts` | Polls .spindle/status.json, fires callbacks. |
 | `dashboard.ts` | Renders subagent status widget. |
-| `mcp.ts` | MCP integration via mcporter. |
+| `mcp.ts` | MCP client built on @modelcontextprotocol/sdk. Full protocol support. |
+| `mcp-config.ts` | Config loading and merging (project > global > editor imports). |
+| `mcp-cache.ts` | Metadata cache for tool schemas (discovery without live connections). |
 | `render.ts` | TUI rendering for spindle_exec and spindle_status. |
 
 ## Subagent Lifecycle
