@@ -5,7 +5,7 @@
  */
 
 import { readStatusFile, type SubagentHandle } from "./workers.js";
-import type { Theme } from "@mariozechner/pi-coding-agent";
+import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 
 function formatDuration(ms: number): string {
@@ -27,7 +27,7 @@ export function renderDashboard(
 ): Text {
     if (subagents.size === 0) return new Text("", 0, 0);
 
-    const running = [...subagents.values()].filter(h => !(h as any).resolved);
+    const running = [...subagents.values()].filter(h => !h.resolved);
     const done = subagents.size - running.length;
 
     const lines: string[] = [];
@@ -44,14 +44,14 @@ export function renderDashboard(
     );
 
     for (const [, handle] of subagents) {
-        const statusDir = (handle as any).statusDir as string;
+        const statusDir = handle.statusDir;
         const sf = readStatusFile(statusDir);
-        const resolved = (handle as any).resolved;
+        const resolved = handle.resolved;
         const elapsed = Date.now() - handle.startTime;
 
         let icon: string;
         let statusText: string;
-        let durationColor: string;
+        let durationColor: ThemeColor;
 
         if (resolved) {
             const s = sf?.status || "crashed";
@@ -91,7 +91,7 @@ export function renderDashboard(
             `  ${icon} ` +
             theme.fg("accent", handle.id) + " " +
             theme.fg("muted", taskPreview) +
-            "  " + theme.fg(durationColor as any, duration) +
+            "  " + theme.fg(durationColor, duration) +
             "  " + statusText,
         );
     }

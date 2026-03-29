@@ -86,7 +86,17 @@ export interface SubagentHandle {
     readonly worktree?: string;
     readonly status: SubagentStatus;
     readonly result: Promise<AgentResult>;
+    /** Whether the result promise has been resolved. */
+    readonly resolved: boolean;
+    /** Whether `.result` was accessed (someone will await it). */
+    readonly awaited: boolean;
+    /** Directory where .spindle/status.json lives. */
+    readonly statusDir: string;
+    /** Whether the startup grace period has elapsed. */
+    readonly pastGrace: boolean;
     cancel(): Promise<void>;
+    /** @internal Resolve the result promise. Used by the poller. */
+    _resolve(result: AgentResult): void;
 }
 
 // ---------------------------------------------------------------------------

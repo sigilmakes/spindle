@@ -3,8 +3,8 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionUIContext, Theme } from "@mariozechner/pi-coding-agent";
+import { Text, type TUI } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
@@ -21,7 +21,6 @@ import {
 } from "./workers.js";
 import { startPoller, stopPoller } from "./poller.js";
 import { renderDashboard } from "./dashboard.js";
-import type { Theme } from "@mariozechner/pi-coding-agent";
 import {
     formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
@@ -51,12 +50,12 @@ export default function spindle(pi: ExtensionAPI) {
     let currentSignal: AbortSignal | undefined;
 
     // Dashboard
-    let widgetUi: any = null;
+    let widgetUi: ExtensionUIContext | null = null;
     let clearTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function updateSpindleStatus(ctx: any): void {
-        if (!ctx?.hasUI) return;
-        const theme = ctx.ui.theme;
+    function updateSpindleStatus(): void {
+        if (!widgetUi) return;
+        const theme = widgetUi.theme;
         if (!theme) return;
 
         const servers = mcpGetServers();
@@ -78,7 +77,7 @@ export default function spindle(pi: ExtensionAPI) {
 
         // Subagent status
         if (activeSubs > 0) {
-            const running = [...subs.values()].filter((h: any) => !h.resolved).length;
+            const running = [...subs.values()].filter(h => !h.resolved).length;
             if (running > 0) {
                 parts.push(theme.fg("warning", `● ${running} subagent${running > 1 ? "s" : ""}`));
             }
@@ -93,9 +92,9 @@ export default function spindle(pi: ExtensionAPI) {
         }
 
         if (parts.length > 0) {
-            ctx.ui.setStatus("spindle", parts.join(theme.fg("dim", " · ")));
+            widgetUi.setStatus("spindle", parts.join(theme.fg("dim", " · ")));
         } else {
-            ctx.ui.setStatus("spindle", "");
+            widgetUi.setStatus("spindle", "");
         }
     }
 
@@ -112,11 +111,11 @@ export default function spindle(pi: ExtensionAPI) {
         if (!theme) return;
         const widget = renderDashboard(subs, theme);
         try {
-            widgetUi.setWidget("spindle-subagents", (_tui: any, _theme: any) => widget);
+            widgetUi.setWidget("spindle-subagents", (_tui: TUI, _theme: Theme) => widget);
         } catch {}
 
         // Auto-clear after all done
-        const allDone = [...subs.values()].every((h: any) => h.resolved);
+        const allDone = [...subs.values()].every(h => h.resolved);
         if (allDone) {
             if (clearTimer) clearTimeout(clearTimer);
             clearTimer = setTimeout(() => {
@@ -151,7 +150,7 @@ export default function spindle(pi: ExtensionAPI) {
                         // Only send notification for fire-and-forget subagents.
                         // If .result was accessed (awaited), the caller already
                         // gets the result directly — no need for a noisy followUp.
-                        if (!(handle as any).awaited) {
+                        if (!handle.awaited) {
                             const duration = result.durationMs < 60000
                                 ? `${(result.durationMs / 1000).toFixed(0)}s`
                                 : `${(result.durationMs / 60000).toFixed(1)}m`;
@@ -173,12 +172,12 @@ export default function spindle(pi: ExtensionAPI) {
                         }
 
                         updateDashboard();
-                        updateSpindleStatus(widgetUi ? { hasUI: true, ui: widgetUi } : null);
+                        updateSpindleStatus();
                     },
                 });
 
                 updateDashboard();
-                updateSpindleStatus(widgetUi ? { hasUI: true, ui: widgetUi } : null);
+                updateSpindleStatus();
                 return handle;
             },
         });
@@ -331,16 +330,17 @@ export default function spindle(pi: ExtensionAPI) {
             }
 
             // Initial status bar
-            updateSpindleStatus(ctx);
+            updateSpindleStatus();
         }
 
         // Restore config
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
-            const entry = entries[i] as any;
-            if (entry.customType === "spindle-config") {
-                if (entry.data?.subModel !== undefined && subModel === undefined) {
-                    subModel = entry.data.subModel;
+            const entry = entries[i];
+            if (entry.type === "custom" && entry.customType === "spindle-config") {
+                const data = entry.data as { subModel?: string } | undefined;
+                if (data?.subModel !== undefined && subModel === undefined) {
+                    subModel = data.subModel;
                 }
             }
         }
@@ -449,7 +449,7 @@ export default function spindle(pi: ExtensionAPI) {
                 };
             } finally {
                 currentSignal = undefined;
-                updateSpindleStatus(ctx);
+                updateSpindleStatus();
             }
         },
 
@@ -570,7 +570,7 @@ export default function spindle(pi: ExtensionAPI) {
                 for (const [, h] of subs) {
                     const elapsed = Date.now() - h.startTime;
                     const dur = elapsed < 60000 ? `${(elapsed / 1000).toFixed(0)}s` : `${(elapsed / 60000).toFixed(1)}m`;
-                    const resolved = (h as any).resolved;
+                    const resolved = h.resolved;
                     const icon = resolved ? "✓" : "⏳";
                     lines.push(`${icon} ${h.id} (${dur}) tmux:${h.session}${h.branch ? ` branch:${h.branch}` : ""}`);
                     lines.push(`  ${h.task.slice(0, 80)}`);

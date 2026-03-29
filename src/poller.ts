@@ -71,9 +71,9 @@ function pollOnce(): void {
     let anyChanged = false;
 
     for (const [id, handle] of subagents) {
-        if ((handle as any).resolved) continue;
+        if (handle.resolved) continue;
 
-        const statusDir = (handle as any).statusDir as string;
+        const statusDir = handle.statusDir;
         const sf = readStatusFile(statusDir);
         const statusKey = sf ? `${sf.status}:${sf.lastUpdate}:${sf.currentTool}` : "null";
         const prevKey = lastStatus.get(id);
@@ -85,11 +85,11 @@ function pollOnce(): void {
 
         if (sf && (sf.status === "done" || sf.status === "crashed")) {
             const result = buildResult(handle, sf);
-            (handle as any)._resolve(result);
+            handle._resolve(result);
             pollerCallbacks?.onDone(handle, result);
             killTmuxSession(handle.session);
             anyChanged = true;
-        } else if ((handle as any).pastGrace && !isTmuxPaneAlive(handle.session)) {
+        } else if (handle.pastGrace && !isTmuxPaneAlive(handle.session)) {
             // Pi process is dead (session gone or fell back to shell)
             // but status file never got a terminal status — treat as crash.
             // Only check after the startup grace period so we don't false-positive
@@ -97,7 +97,7 @@ function pollOnce(): void {
             const result = sf
                 ? buildResult(handle, { ...sf, status: "crashed", exitCode: -1, endTime: Date.now() })
                 : crashResult(handle);
-            (handle as any)._resolve(result);
+            handle._resolve(result);
             pollerCallbacks?.onDone(handle, result);
             killTmuxSession(handle.session);
             anyChanged = true;
@@ -111,7 +111,7 @@ function pollOnce(): void {
     // Stop polling when all resolved
     let allDone = true;
     for (const handle of subagents.values()) {
-        if (!(handle as any).resolved) { allDone = false; break; }
+        if (!handle.resolved) { allDone = false; break; }
     }
     if (allDone) {
         pollerCallbacks?.onUpdate(subagents);
@@ -119,7 +119,7 @@ function pollOnce(): void {
             const current = getActiveSubagents();
             let stillDone = true;
             for (const h of current.values()) {
-                if (!(h as any).resolved) { stillDone = false; break; }
+                if (!h.resolved) { stillDone = false; break; }
             }
             if (stillDone) stopPoller();
         }, 5000);
