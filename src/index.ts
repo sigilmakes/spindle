@@ -9,7 +9,7 @@ import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
 import { createDiff, retry, createContextTools } from "./builtins.js";
-import { setExtensionDir } from "./agents.js";
+import { setExtensionDir, discoverAgents } from "./agents.js";
 import {
     mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup,
     mcpInit, mcpGetPromptSummary, mcpReload, mcpGetServers, mcpGetConnectedCount,
@@ -45,6 +45,21 @@ export default function spindle(pi: ExtensionAPI) {
     let repl: Repl | null = null;
     let cwd = process.cwd();
     let subModel: string | undefined;
+
+    // Discover available agent types for prompt guidelines
+    const agents = discoverAgents(cwd);
+    const agentGuidelineLines: string[] = [];
+    if (agents.length > 0) {
+        agentGuidelineLines.push(
+            "",
+            "Available subagent types (use { agent: \"name\" } option):",
+            ...agents.map((a) => {
+                const meta: string[] = [a.source];
+                if (a.model) meta.push(a.model);
+                return `  - ${a.name}: ${a.description} (${meta.join(", ")})`;
+            }),
+        );
+    }
 
     const cumulativeUsage = { totalCost: 0, totalSubagents: 0 };
 
@@ -416,6 +431,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "Builtins: read, edit, write, bash, grep, find, ls, load, save,",
                 "  subagent, mcp, mcp_call, mcp_connect, mcp_disconnect,",
                 "  sleep, diff, retry, vars, clear, help",
+                ...agentGuidelineLines,
             ].join("\n"),
         ],
 
