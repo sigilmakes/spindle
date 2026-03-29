@@ -148,24 +148,29 @@ export default function spindle(pi: ExtensionAPI) {
                         cumulativeUsage.totalCost += result.cost;
                         cumulativeUsage.totalSubagents++;
 
-                        const duration = result.durationMs < 60000
-                            ? `${(result.durationMs / 1000).toFixed(0)}s`
-                            : `${(result.durationMs / 60000).toFixed(1)}m`;
+                        // Only send notification for fire-and-forget subagents.
+                        // If .result was accessed (awaited), the caller already
+                        // gets the result directly — no need for a noisy followUp.
+                        if (!(handle as any).awaited) {
+                            const duration = result.durationMs < 60000
+                                ? `${(result.durationMs / 1000).toFixed(0)}s`
+                                : `${(result.durationMs / 60000).toFixed(1)}m`;
 
-                        const icon = result.ok ? "✓" : "✗";
-                        let line = `${icon} **${handle.id}** finished (${duration}, ${result.status})`;
-                        if (result.branch) line += ` · \`${result.branch}\``;
-                        line += ` — $${result.cost.toFixed(2)}`;
+                            const icon = result.ok ? "✓" : "✗";
+                            let line = `${icon} **${handle.id}** finished (${duration}, ${result.status})`;
+                            if (result.branch) line += ` · \`${result.branch}\``;
+                            line += ` — $${result.cost.toFixed(2)}`;
 
-                        pi.sendMessage({
-                            customType: "spindle-subagent-done",
-                            content: line,
-                            display: true,
-                            details: result,
-                        }, {
-                            deliverAs: "followUp",
-                            triggerTurn: true,
-                        });
+                            pi.sendMessage({
+                                customType: "spindle-subagent-done",
+                                content: line,
+                                display: true,
+                                details: result,
+                            }, {
+                                deliverAs: "followUp",
+                                triggerTurn: true,
+                            });
+                        }
 
                         updateDashboard();
                         updateSpindleStatus(widgetUi ? { hasUI: true, ui: widgetUi } : null);

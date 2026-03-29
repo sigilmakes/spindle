@@ -321,6 +321,7 @@ class SubagentHandleImpl implements SubagentHandle {
     private _result: Promise<AgentResult>;
     private _resolveResult!: (result: AgentResult) => void;
     private _resolved = false;
+    private _resultAccessed = false;
 
     /** Grace period (ms) before we start checking if the pane process is alive.
      *  Needed because tmux send-keys hasn't launched pi yet when the poller first runs. */
@@ -355,7 +356,13 @@ class SubagentHandleImpl implements SubagentHandle {
     }
 
     get result(): Promise<AgentResult> {
+        this._resultAccessed = true;
         return this._result;
+    }
+
+    /** True if `.result` was accessed — meaning someone will await it. */
+    get awaited(): boolean {
+        return this._resultAccessed;
     }
 
     _resolve(result: AgentResult): void {
