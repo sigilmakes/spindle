@@ -124,6 +124,17 @@ export function mcpGetPromptSummary(): string | null {
 /**
  * Reload config (e.g. after editing mcp.json).
  */
+/**
+ * Get count of currently connected servers.
+ */
+export function mcpGetConnectedCount(): number {
+    let count = 0;
+    for (const conn of _connections.values()) {
+        if (conn.status === "connected") count++;
+    }
+    return count;
+}
+
 export async function mcpReload(cwd?: string): Promise<void> {
     if (cwd) _cwd = cwd;
     // Disconnect all before reloading

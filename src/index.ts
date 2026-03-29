@@ -12,7 +12,7 @@ import { createDiff, retry, createContextTools } from "./builtins.js";
 import { setExtensionDir } from "./agents.js";
 import {
     mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup,
-    mcpInit, mcpGetPromptSummary, mcpReload, mcpGetServers,
+    mcpInit, mcpGetPromptSummary, mcpReload, mcpGetServers, mcpGetConnectedCount,
     type McpHandlers,
 } from "./mcp.js";
 import {
@@ -53,6 +53,51 @@ export default function spindle(pi: ExtensionAPI) {
     // Dashboard
     let widgetUi: any = null;
     let clearTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function updateSpindleStatus(ctx: any): void {
+        if (!ctx?.hasUI) return;
+        const theme = ctx.ui.theme;
+        if (!theme) return;
+
+        const servers = mcpGetServers();
+        const connected = mcpGetConnectedCount();
+        const total = servers.size;
+        const subs = getActiveSubagents();
+        const activeSubs = subs.size;
+
+        const parts: string[] = [];
+
+        // MCP status
+        if (total > 0) {
+            if (connected > 0) {
+                parts.push(theme.fg("success", `MCP: ${connected}/${total}`));
+            } else {
+                parts.push(theme.fg("dim", `MCP: ${total} servers`));
+            }
+        }
+
+        // Subagent status
+        if (activeSubs > 0) {
+            const running = [...subs.values()].filter((h: any) => !h.resolved).length;
+            if (running > 0) {
+                parts.push(theme.fg("warning", `● ${running} subagent${running > 1 ? "s" : ""}`));
+            }
+        }
+
+        // REPL status
+        if (repl) {
+            const vars = repl.getVariables();
+            if (vars.length > 0) {
+                parts.push(theme.fg("dim", `REPL: ${vars.length} var${vars.length > 1 ? "s" : ""}`));
+            }
+        }
+
+        if (parts.length > 0) {
+            ctx.ui.setStatus("spindle", parts.join(theme.fg("dim", " · ")));
+        } else {
+            ctx.ui.setStatus("spindle", "");
+        }
+    }
 
     function updateDashboard(): void {
         if (!widgetUi) return;
@@ -123,10 +168,12 @@ export default function spindle(pi: ExtensionAPI) {
                         });
 
                         updateDashboard();
+                        updateSpindleStatus(widgetUi ? { hasUI: true, ui: widgetUi } : null);
                     },
                 });
 
                 updateDashboard();
+                updateSpindleStatus(widgetUi ? { hasUI: true, ui: widgetUi } : null);
                 return handle;
             },
         });
@@ -244,6 +291,47 @@ export default function spindle(pi: ExtensionAPI) {
         };
         mcpInit(ctx.cwd, mcpHandlers);
 
+        // --- MCP startup listing ---
+        if (ctx.hasUI) {
+            const servers = mcpGetServers();
+            if (servers.size > 0) {
+                const theme = ctx.ui.theme;
+                const lines: string[] = [];
+                const globalServers: string[] = [];
+                const projectServers: string[] = [];
+                const importedServers: string[] = [];
+
+                for (const [name, resolved] of servers) {
+                    const desc = resolved.entry.description
+                        ? theme.fg("dim", ` — ${resolved.entry.description}`)
+                        : "";
+                    const line = `    ${name}${desc}`;
+                    if (resolved.source === "project") projectServers.push(line);
+                    else if (resolved.source === "global") globalServers.push(line);
+                    else importedServers.push(line);
+                }
+
+                if (projectServers.length > 0) {
+                    lines.push(theme.fg("dim", "  project"));
+                    lines.push(...projectServers);
+                }
+                if (globalServers.length > 0) {
+                    lines.push(theme.fg("dim", "  global"));
+                    lines.push(...globalServers);
+                }
+                if (importedServers.length > 0) {
+                    lines.push(theme.fg("dim", "  imported"));
+                    lines.push(...importedServers);
+                }
+
+                console.log(theme.bold("[MCP Servers]"));
+                for (const line of lines) console.log(line);
+            }
+
+            // Initial status bar
+            updateSpindleStatus(ctx);
+        }
+
         // Restore config
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
@@ -359,6 +447,7 @@ export default function spindle(pi: ExtensionAPI) {
                 };
             } finally {
                 currentSignal = undefined;
+                updateSpindleStatus(ctx);
             }
         },
 
@@ -529,7 +618,7 @@ export { discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";
 export {
     mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup,
-    mcpInit, mcpGetPromptSummary, mcpReload, mcpGetServers,
+    mcpInit, mcpGetPromptSummary, mcpReload, mcpGetServers, mcpGetConnectedCount,
 } from "./mcp.js";
 export type { McpHandlers } from "./mcp.js";
 export { loadMcpConfig, buildServerPromptSummary } from "./mcp-config.js";
