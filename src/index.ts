@@ -72,7 +72,7 @@ export default function spindle(pi: ExtensionAPI) {
             if (connected > 0) {
                 parts.push(theme.fg("success", `MCP: ${connected}/${total}`));
             } else {
-                parts.push(theme.fg("dim", `MCP: ${total} servers`));
+                parts.push(`MCP: ${total} server${total !== 1 ? "s" : ""}`);
             }
         }
 
@@ -295,37 +295,34 @@ export default function spindle(pi: ExtensionAPI) {
         if (ctx.hasUI) {
             const servers = mcpGetServers();
             if (servers.size > 0) {
-                const theme = ctx.ui.theme;
-                const lines: string[] = [];
                 const globalServers: string[] = [];
                 const projectServers: string[] = [];
                 const importedServers: string[] = [];
 
                 for (const [name, resolved] of servers) {
                     const desc = resolved.entry.description
-                        ? theme.fg("dim", ` — ${resolved.entry.description}`)
+                        ? ` — ${resolved.entry.description}`
                         : "";
-                    const line = `    ${name}${desc}`;
+                    const line = `      ${name}${desc}`;
                     if (resolved.source === "project") projectServers.push(line);
                     else if (resolved.source === "global") globalServers.push(line);
                     else importedServers.push(line);
                 }
 
+                const lines: string[] = ["[MCP Servers]"];
                 if (projectServers.length > 0) {
-                    lines.push(theme.fg("dim", "  project"));
+                    lines.push("  project");
                     lines.push(...projectServers);
                 }
                 if (globalServers.length > 0) {
-                    lines.push(theme.fg("dim", "  global"));
+                    lines.push("  global");
                     lines.push(...globalServers);
                 }
                 if (importedServers.length > 0) {
-                    lines.push(theme.fg("dim", "  imported"));
+                    lines.push("  imported");
                     lines.push(...importedServers);
                 }
-
-                console.log(theme.bold("[MCP Servers]"));
-                for (const line of lines) console.log(line);
+                ctx.ui.notify(lines.join("\n"), "info");
             }
 
             // Initial status bar

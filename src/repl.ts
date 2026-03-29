@@ -10,6 +10,7 @@ const TOOL_NAMES = new Set([
     "read", "bash", "grep", "find", "edit", "write", "ls",
     "load", "save", "llm", "thread", "dispatch", "sleep",
     "diff", "retry", "vars", "clear", "help",
+    "subagent", "mcp", "mcp_call", "mcp_connect", "mcp_disconnect",
 ]);
 
 /** JS globals provided to the vm context. Excluded from vars() but NOT preserved across reset. */
