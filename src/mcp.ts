@@ -1,112 +1,478 @@
 /**
- * MCP integration for Spindle via mcporter.
+ * MCP integration for Spindle — built on @modelcontextprotocol/sdk.
  *
- * Exposes three REPL builtins:
- *   mcp(server?)        — list servers or tools for a specific server
+ * Features:
+ *   - Full MCP protocol (tools, sampling, elicitation, roots)
+ *   - Lazy connections with idle timeout
+ *   - Metadata caching (tool discovery without live connections)
+ *   - Config layering (project > global > editor imports)
+ *
+ * REPL builtins:
+ *   mcp(server?)               — list servers or tools
  *   mcp_call(server, tool, args) — one-shot tool call
- *   mcp_connect(server) — returns a persistent ServerProxy
+ *   mcp_connect(server)        — persistent connection handle
+ *   mcp_disconnect(server?)    — close connections
  */
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
+
 import { ToolResult } from "./tools.js";
+import {
+    loadMcpConfig, buildServerPromptSummary,
+    interpolateEnv, resolveServerEnv, resolveServerHeaders,
+    type McpServerEntry, type ResolvedServer,
+} from "./mcp-config.js";
+import {
+    getCachedTools, updateCache, removeCached,
+    resetCacheMemory, type CachedToolInfo,
+} from "./mcp-cache.js";
 
-// Lazy imports — mcporter is heavy, don't load until first use
-let _createRuntime: typeof import("mcporter").createRuntime | null = null;
-let _createServerProxy: typeof import("mcporter").createServerProxy | null = null;
-let _callOnce: typeof import("mcporter").callOnce | null = null;
+// --- Types ---
 
-async function loadMcporter() {
-    if (!_createRuntime) {
-        const mod = await import("mcporter");
-        _createRuntime = mod.createRuntime;
-        _createServerProxy = mod.createServerProxy;
-        _callOnce = mod.callOnce;
+interface ManagedConnection {
+    client: Client;
+    transport: Transport;
+    serverName: string;
+    status: "connecting" | "connected" | "closed";
+    lastUsedAt: number;
+    idleTimer?: ReturnType<typeof setTimeout>;
+}
+
+interface McpToolInfo {
+    name: string;
+    description?: string;
+    inputSchema?: unknown;
+}
+
+// --- Callbacks for server→client requests ---
+
+export interface McpHandlers {
+    /** Handle sampling/createMessage requests from servers */
+    onSampling?: (params: {
+        messages: unknown[];
+        systemPrompt?: string;
+        maxTokens: number;
+        temperature?: number;
+        modelPreferences?: unknown;
+    }) => Promise<{
+        model: string;
+        role: "assistant";
+        content: { type: "text"; text: string };
+        stopReason?: string;
+    }>;
+
+    /** Handle elicitation/create requests from servers */
+    onElicitation?: (params: {
+        message: string;
+        requestedSchema?: unknown;
+    }) => Promise<{
+        action: "accept" | "decline" | "cancel";
+        content?: Record<string, unknown>;
+    }>;
+
+    /** Handle roots/list requests from servers */
+    onRoots?: () => Promise<{
+        roots: Array<{ uri: string; name?: string }>;
+    }>;
+}
+
+// --- State ---
+
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const CONNECT_TIMEOUT_MS = 30_000;
+
+let _connections = new Map<string, ManagedConnection>();
+let _connectPromises = new Map<string, Promise<ManagedConnection>>();
+let _servers = new Map<string, ResolvedServer>();
+let _cwd = process.cwd();
+let _handlers: McpHandlers = {};
+let _initialized = false;
+
+// --- Init ---
+
+/**
+ * Initialize (or reinitialize) the MCP subsystem.
+ * Reads config, does NOT connect to anything.
+ */
+export function mcpInit(cwd: string, handlers?: McpHandlers): void {
+    _cwd = cwd;
+    if (handlers) _handlers = handlers;
+    const { servers } = loadMcpConfig(cwd);
+    _servers = servers;
+    _initialized = true;
+}
+
+/**
+ * Get the current server map (for prompt injection).
+ */
+export function mcpGetServers(): Map<string, ResolvedServer> {
+    if (!_initialized) mcpInit(_cwd);
+    return _servers;
+}
+
+/**
+ * Build the prompt summary string.
+ */
+export function mcpGetPromptSummary(): string | null {
+    return buildServerPromptSummary(mcpGetServers());
+}
+
+/**
+ * Reload config (e.g. after editing mcp.json).
+ */
+export async function mcpReload(cwd?: string): Promise<void> {
+    if (cwd) _cwd = cwd;
+    // Disconnect all before reloading
+    await mcpCleanup();
+    resetCacheMemory();
+    const { servers } = loadMcpConfig(_cwd);
+    _servers = servers;
+    _initialized = true;
+}
+
+// --- Connection management ---
+
+function getIdleTimeout(entry: McpServerEntry): number {
+    if (entry.idleTimeout === 0) return 0; // Disabled
+    return (entry.idleTimeout ?? 10) * 60 * 1000;
+}
+
+function touchConnection(conn: ManagedConnection): void {
+    conn.lastUsedAt = Date.now();
+
+    // Reset idle timer
+    if (conn.idleTimer) clearTimeout(conn.idleTimer);
+
+    const resolved = _servers.get(conn.serverName);
+    const timeout = resolved ? getIdleTimeout(resolved.entry) : DEFAULT_IDLE_TIMEOUT_MS;
+
+    if (timeout > 0) {
+        conn.idleTimer = setTimeout(async () => {
+            await disconnectServer(conn.serverName);
+        }, timeout);
     }
-    return { createRuntime: _createRuntime!, createServerProxy: _createServerProxy!, callOnce: _callOnce! };
 }
 
-// Singleton runtime — created on first use, reused for connection pooling
-let _runtime: Awaited<ReturnType<typeof import("mcporter").createRuntime>> | null = null;
+function buildCapabilities(): ClientCapabilities {
+    const caps: ClientCapabilities = {};
 
-function resolveConfigPath(): string | undefined {
-    const piConfig = join(homedir(), ".pi", "agent", "mcp.json");
-    if (existsSync(piConfig)) return piConfig;
-    return undefined;
+    if (_handlers.onSampling) {
+        caps.sampling = {};
+    }
+    if (_handlers.onElicitation) {
+        caps.elicitation = {};
+    }
+    if (_handlers.onRoots) {
+        caps.roots = { listChanged: false };
+    }
+
+    return caps;
 }
 
-async function getRuntime() {
-    if (!_runtime) {
-        const { createRuntime } = await loadMcporter();
-        _runtime = await createRuntime({
-            configPath: resolveConfigPath(),
+async function createTransport(entry: McpServerEntry): Promise<Transport> {
+    if (entry.command) {
+        // Stdio transport
+        return new StdioClientTransport({
+            command: entry.command,
+            args: entry.args,
+            env: resolveServerEnv(entry) ?? undefined,
+            cwd: entry.cwd,
+            stderr: "ignore",
         });
     }
-    return _runtime;
+
+    if (entry.url) {
+        // HTTP transport — try StreamableHTTP first, fall back to SSE
+        const url = new URL(entry.url);
+        const headers = resolveServerHeaders(entry);
+        const requestInit: RequestInit | undefined = headers
+            ? { headers: headers as HeadersInit }
+            : undefined;
+
+        try {
+            const transport = new StreamableHTTPClientTransport(url, { requestInit });
+            // Test with a probe client
+            const probe = new Client({ name: "spindle-probe", version: "1.0.0" });
+            await probe.connect(transport);
+            await probe.close().catch(() => {});
+            await transport.close().catch(() => {});
+            // Success — create fresh transport for real use
+            return new StreamableHTTPClientTransport(url, { requestInit });
+        } catch {
+            // Fall back to SSE
+            await Promise.resolve(); // Allow cleanup
+            return new SSEClientTransport(url, { requestInit });
+        }
+    }
+
+    throw new Error("Server entry must have either 'command' (stdio) or 'url' (HTTP)");
 }
 
-// Track connected proxies for cleanup
-const _proxies = new Map<string, unknown>();
+function registerHandlers(client: Client, serverName: string): void {
+    // Dynamically import schemas and register handlers
+    // We do this inline to avoid top-level import issues
+
+    if (_handlers.onSampling) {
+        const handler = _handlers.onSampling;
+        import("@modelcontextprotocol/sdk/types.js").then(({ CreateMessageRequestSchema }) => {
+            client.setRequestHandler(CreateMessageRequestSchema, async (request) => {
+                const params = request.params;
+                const result = await handler({
+                    messages: params.messages,
+                    systemPrompt: params.systemPrompt,
+                    maxTokens: params.maxTokens,
+                    temperature: params.temperature,
+                    modelPreferences: params.modelPreferences,
+                });
+                return result;
+            });
+        }).catch(() => {});
+    }
+
+    if (_handlers.onElicitation) {
+        const handler = _handlers.onElicitation;
+        import("@modelcontextprotocol/sdk/types.js").then(({ ElicitRequestSchema }) => {
+            client.setRequestHandler(ElicitRequestSchema, async (request) => {
+                const params = request.params;
+                return handler({
+                    message: params.message,
+                    requestedSchema: (params as any).requestedSchema,
+                });
+            });
+        }).catch(() => {});
+    }
+
+    if (_handlers.onRoots) {
+        const handler = _handlers.onRoots;
+        import("@modelcontextprotocol/sdk/types.js").then(({ ListRootsRequestSchema }) => {
+            client.setRequestHandler(ListRootsRequestSchema, async () => {
+                return handler();
+            });
+        }).catch(() => {});
+    }
+}
+
+async function connectServer(serverName: string): Promise<ManagedConnection> {
+    // Check for existing connection
+    const existing = _connections.get(serverName);
+    if (existing?.status === "connected") {
+        touchConnection(existing);
+        return existing;
+    }
+
+    // Dedupe concurrent connect attempts
+    const pending = _connectPromises.get(serverName);
+    if (pending) return pending;
+
+    const promise = doConnect(serverName);
+    _connectPromises.set(serverName, promise);
+
+    try {
+        const conn = await promise;
+        _connections.set(serverName, conn);
+        return conn;
+    } finally {
+        _connectPromises.delete(serverName);
+    }
+}
+
+async function doConnect(serverName: string): Promise<ManagedConnection> {
+    const resolved = _servers.get(serverName);
+    if (!resolved) {
+        const available = [..._servers.keys()];
+        throw new Error(
+            `Unknown MCP server "${serverName}".` +
+            (available.length > 0 ? ` Available: ${available.join(", ")}` : " No servers configured.")
+        );
+    }
+
+    const entry = resolved.entry;
+    const capabilities = buildCapabilities();
+
+    const client = new Client(
+        { name: "spindle", version: "0.3.0" },
+        { capabilities },
+    );
+
+    const transport = await createTransport(entry);
+
+    const conn: ManagedConnection = {
+        client,
+        transport,
+        serverName,
+        status: "connecting",
+        lastUsedAt: Date.now(),
+    };
+
+    // Register server→client handlers before connecting
+    registerHandlers(client, serverName);
+
+    // Connect with timeout
+    const connectPromise = client.connect(transport);
+    const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Connection to "${serverName}" timed out after ${CONNECT_TIMEOUT_MS / 1000}s`)), CONNECT_TIMEOUT_MS)
+    );
+
+    await Promise.race([connectPromise, timeoutPromise]);
+
+    conn.status = "connected";
+    touchConnection(conn);
+
+    // Refresh metadata cache in background
+    refreshCache(serverName, client).catch(() => {});
+
+    return conn;
+}
+
+async function disconnectServer(serverName: string): Promise<void> {
+    const conn = _connections.get(serverName);
+    if (!conn) return;
+
+    if (conn.idleTimer) clearTimeout(conn.idleTimer);
+    conn.status = "closed";
+    _connections.delete(serverName);
+
+    try {
+        await conn.client.close();
+    } catch { /* best effort */ }
+    try {
+        await conn.transport.close();
+    } catch { /* best effort */ }
+}
+
+async function refreshCache(serverName: string, client: Client): Promise<void> {
+    try {
+        const allTools: McpToolInfo[] = [];
+        let cursor: string | undefined;
+
+        do {
+            const result = await client.listTools(cursor ? { cursor } : undefined);
+            for (const tool of result.tools ?? []) {
+                allTools.push({
+                    name: tool.name,
+                    description: tool.description,
+                    inputSchema: tool.inputSchema,
+                });
+            }
+            cursor = result.nextCursor;
+        } while (cursor);
+
+        updateCache(serverName, allTools);
+    } catch {
+        // Cache refresh is best-effort
+    }
+}
+
+// --- REPL Builtins ---
 
 /**
  * mcp(server?) — Discovery builtin.
- *   mcp()           → list all server names with status
- *   mcp("linear")   → list tools for a specific server
- *   mcp("linear", { schema: true }) → include parameter schemas
+ *   mcp()                      → list all servers with status
+ *   mcp("server")              → list tools (from cache or live)
+ *   mcp("server", {schema: true}) → include parameter schemas
  */
 export async function mcpList(
     server?: string,
     opts?: { schema?: boolean },
 ): Promise<ToolResult> {
     try {
-        const runtime = await getRuntime();
+        if (!_initialized) mcpInit(_cwd);
 
         if (!server) {
             // List all servers
-            const servers = runtime.listServers();
-            if (servers.length === 0) {
-                return ToolResult.success("No MCP servers configured.\nConfig: ~/.pi/agent/mcp.json");
+            if (_servers.size === 0) {
+                return ToolResult.success(
+                    "No MCP servers configured.\n" +
+                    "Config: ~/.pi/agent/mcp.json (global) or .pi/mcp.json (project)"
+                );
             }
-            return ToolResult.success(
-                `MCP servers (${servers.length}):\n` +
-                servers.map(s => `  ${s}`).join("\n")
-            );
+
+            const lines: string[] = [`MCP servers (${_servers.size}):`];
+            for (const [name, resolved] of _servers) {
+                const conn = _connections.get(name);
+                const status = conn?.status === "connected" ? "●" : "○";
+                const source = resolved.source === "project" ? "[project]"
+                    : resolved.source === "global" ? "[global]"
+                    : `[${resolved.source}]`;
+                let line = `  ${status} ${name} ${source}`;
+                if (resolved.entry.description) {
+                    line += ` — ${resolved.entry.description}`;
+                }
+                lines.push(line);
+            }
+            return ToolResult.success(lines.join("\n"));
         }
 
         // List tools for a specific server
-        const tools = await runtime.listTools(server, {
-            includeSchema: opts?.schema ?? false,
-        });
+        const includeSchema = opts?.schema ?? false;
 
-        if (tools.length === 0) {
-            return ToolResult.success(`Server "${server}" has no tools.`);
+        // Try cache first
+        const cached = getCachedTools(server);
+        if (cached && cached.length > 0) {
+            return formatToolList(server, cached, includeSchema, true);
         }
 
-        const lines = tools.map(t => {
-            let line = `  ${t.name}`;
-            if (t.description) {
-                const desc = t.description.length > 80
-                    ? t.description.slice(0, 80) + "..."
-                    : t.description;
-                line += ` — ${desc}`;
-            }
-            if (opts?.schema && t.inputSchema) {
-                line += `\n    Schema: ${JSON.stringify(t.inputSchema)}`;
-            }
-            return line;
-        });
+        // No cache — need a live connection
+        const conn = await connectServer(server);
+        const allTools: McpToolInfo[] = [];
+        let cursor: string | undefined;
 
-        return ToolResult.success(
-            `${server} (${tools.length} tools):\n` + lines.join("\n")
-        );
+        do {
+            const result = await conn.client.listTools(cursor ? { cursor } : undefined);
+            for (const tool of result.tools ?? []) {
+                allTools.push({
+                    name: tool.name,
+                    description: tool.description,
+                    inputSchema: tool.inputSchema,
+                });
+            }
+            cursor = result.nextCursor;
+        } while (cursor);
+
+        updateCache(server, allTools);
+        return formatToolList(server, allTools, includeSchema, false);
     } catch (err: any) {
         return ToolResult.fail(err.message || String(err));
     }
 }
 
+function formatToolList(
+    server: string,
+    tools: CachedToolInfo[],
+    includeSchema: boolean,
+    fromCache: boolean,
+): ToolResult {
+    if (tools.length === 0) {
+        return ToolResult.success(`Server "${server}" has no tools.`);
+    }
+
+    const lines = tools.map(t => {
+        let line = `  ${t.name}`;
+        if (t.description) {
+            const desc = t.description.length > 100
+                ? t.description.slice(0, 100) + "..."
+                : t.description;
+            line += ` — ${desc}`;
+        }
+        if (includeSchema && t.inputSchema) {
+            line += `\n    Schema: ${JSON.stringify(t.inputSchema)}`;
+        }
+        return line;
+    });
+
+    const suffix = fromCache ? " (cached)" : "";
+    return ToolResult.success(
+        `${server} (${tools.length} tools)${suffix}:\n` + lines.join("\n")
+    );
+}
+
 /**
  * mcp_call(server, tool, args?) — One-shot tool call.
- * Uses the shared pooled runtime so repeated calls reuse connections.
+ * Lazy-connects if needed. Reuses pooled connections.
  */
 export async function mcpCall(
     server: string,
@@ -114,12 +480,18 @@ export async function mcpCall(
     args?: Record<string, unknown>,
 ): Promise<ToolResult> {
     try {
-        const runtime = await getRuntime();
-        const result = await runtime.callTool(server, toolName, { args });
+        if (!_initialized) mcpInit(_cwd);
 
-        // Extract text from MCP result, check for MCP-level errors
+        const conn = await connectServer(server);
+        touchConnection(conn);
+
+        const result = await conn.client.callTool({
+            name: toolName,
+            arguments: args,
+        });
+
         const text = extractResultText(result);
-        if (typeof result === "object" && result !== null && (result as any).isError) {
+        if (result.isError) {
             return ToolResult.fail(text);
         }
         return ToolResult.success(text);
@@ -129,83 +501,102 @@ export async function mcpCall(
 }
 
 /**
- * mcp_connect(server) — Returns a persistent ServerProxy.
- * The proxy lives in REPL state and reuses the pooled runtime connection.
- * Methods are camelCase, schema-validated, return CallResult with .text()/.json()/.markdown().
+ * mcp_connect(server) — Returns a persistent connection proxy.
+ * Methods map to tool calls on the server.
  *
- * Unlike other MCP builtins, this throws on error (not ToolResult) because
- * the return value is a proxy object the caller stores in a variable.
+ * Unlike other builtins, throws on error (not ToolResult)
+ * because the return value is stored in a REPL variable.
  */
 export async function mcpConnect(server: string): Promise<unknown> {
-    const { createServerProxy } = await loadMcporter();
-    const runtime = await getRuntime();
+    if (!_initialized) mcpInit(_cwd);
 
-    // Verify server exists — throws with clear message if not found
-    try {
-        runtime.getDefinition(server);
-    } catch {
-        const available = runtime.listServers();
-        throw new Error(
-            `Unknown MCP server "${server}".` +
-            (available.length > 0 ? ` Available: ${available.join(", ")}` : " No servers configured.")
-        );
+    const conn = await connectServer(server);
+
+    // Build a proxy that maps method calls to tool calls
+    // Get the tool list for method name mapping
+    let tools: McpToolInfo[] = getCachedTools(server) ?? [];
+    if (tools.length === 0) {
+        // Fetch live
+        const allTools: McpToolInfo[] = [];
+        let cursor: string | undefined;
+        do {
+            const result = await conn.client.listTools(cursor ? { cursor } : undefined);
+            for (const tool of result.tools ?? []) {
+                allTools.push({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema });
+            }
+            cursor = result.nextCursor;
+        } while (cursor);
+        tools = allTools;
+        updateCache(server, tools);
     }
 
-    const rawProxy = createServerProxy(runtime, server);
+    // Build tool name lookup (camelCase → original)
+    const toolMap = new Map<string, string>();
+    for (const t of tools) {
+        toolMap.set(t.name, t.name);
+        // Also allow camelCase access
+        const camel = t.name.replace(/[-_](\w)/g, (_, c) => c.toUpperCase());
+        if (camel !== t.name) toolMap.set(camel, t.name);
+    }
 
-    // Wrap the proxy so that MCP errors from tool calls are caught and
-    // returned as failed ToolResults instead of crashing pi with an
-    // unhandled rejection. The raw proxy throws McpError directly, which
-    // can escape the REPL's vm context error handling.
-    const safeProxy = new Proxy(rawProxy, {
-        get(target: any, prop: string | symbol) {
-            const value = target[prop];
-            if (typeof value !== "function") return value;
-            return async (...args: unknown[]) => {
+    const proxy = new Proxy({} as Record<string, unknown>, {
+        get(_target, prop: string | symbol) {
+            if (typeof prop !== "string") return undefined;
+
+            // Special properties
+            if (prop === "tools") return tools.map(t => t.name);
+            if (prop === "server") return server;
+            if (prop === "disconnect") return () => mcpDisconnect(server);
+
+            const toolName = toolMap.get(prop);
+            if (!toolName) return undefined;
+
+            return async (args?: Record<string, unknown>) => {
                 try {
-                    return await value.apply(target, args);
+                    const c = await connectServer(server);
+                    touchConnection(c);
+                    const result = await c.client.callTool({
+                        name: toolName,
+                        arguments: args,
+                    });
+                    const text = extractResultText(result);
+                    if (result.isError) {
+                        return ToolResult.fail(text);
+                    }
+                    return ToolResult.success(text);
                 } catch (err: any) {
-                    // Don't re-throw — host-context rejections escape the
-                    // REPL's vm-context await and crash pi. Return an
-                    // error-shaped CallResult so the caller can inspect it.
-                    const msg = `MCP call failed: ${err.message || String(err)}`;
-                    return {
-                        text: () => msg,
-                        json: () => ({ error: msg }),
-                        markdown: () => `**Error:** ${msg}`,
-                        isError: true,
-                        content: [{ type: "text", text: msg }],
-                    };
+                    // Don't throw — return error-shaped result
+                    // (host-context rejections can escape the REPL's vm context)
+                    return ToolResult.fail(`MCP call failed: ${err.message || String(err)}`);
                 }
             };
         },
     });
 
-    _proxies.set(server, safeProxy);
-    return safeProxy;
+    return proxy;
 }
 
 /**
  * mcp_disconnect(server?) — Close connections.
- *   mcp_disconnect()        → close all
- *   mcp_disconnect("linear") → close specific server
+ *   mcp_disconnect()         → close all
+ *   mcp_disconnect("server") → close specific
  */
 export async function mcpDisconnect(server?: string): Promise<ToolResult> {
     try {
-        if (_runtime) {
-            if (server) {
-                await _runtime.close(server);
-            } else {
-                await _runtime.close();
-                _runtime = null; // Force fresh runtime on next use
-            }
-        }
         if (server) {
-            _proxies.delete(server);
+            await disconnectServer(server);
+            return ToolResult.success(`Disconnected from "${server}".`);
         } else {
-            _proxies.clear();
+            const names = [..._connections.keys()];
+            for (const name of names) {
+                await disconnectServer(name);
+            }
+            return ToolResult.success(
+                names.length > 0
+                    ? `Disconnected ${names.length} server(s).`
+                    : "No active connections."
+            );
         }
-        return ToolResult.success(server ? `Disconnected from "${server}".` : "Disconnected all MCP servers.");
     } catch (err: any) {
         return ToolResult.fail(err.message || String(err));
     }
@@ -215,17 +606,16 @@ export async function mcpDisconnect(server?: string): Promise<ToolResult> {
  * Cleanup all MCP connections. Called on session shutdown.
  */
 export async function mcpCleanup(): Promise<void> {
-    if (_runtime) {
-        try {
-            await _runtime.close();
-        } catch { /* best effort */ }
-        _runtime = null;
+    const names = [..._connections.keys()];
+    for (const name of names) {
+        await disconnectServer(name);
     }
-    _proxies.clear();
-    _createRuntime = null;
-    _createServerProxy = null;
-    _callOnce = null;
+    _connections.clear();
+    _connectPromises.clear();
+    _initialized = false;
 }
+
+// --- Helpers ---
 
 /**
  * Extract readable text from an MCP call result.
@@ -234,7 +624,6 @@ function extractResultText(result: unknown): string {
     if (result === null || result === undefined) return "(empty result)";
     if (typeof result === "string") return result;
 
-    // MCP results often have a content array
     if (typeof result === "object" && "content" in (result as any)) {
         const content = (result as any).content;
         if (Array.isArray(content)) {
@@ -242,6 +631,8 @@ function extractResultText(result: unknown): string {
                 .map((c: any) => {
                     if (c.type === "text" && c.text) return c.text;
                     if (c.type === "image") return `[Image: ${c.mimeType ?? "unknown"}]`;
+                    if (c.type === "audio") return `[Audio: ${c.mimeType ?? "unknown"}]`;
+                    if (c.type === "resource") return `[Resource: ${c.resource?.uri ?? "unknown"}]`;
                     return JSON.stringify(c);
                 })
                 .join("\n");

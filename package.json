@@ -1,6 +1,6 @@
 {
   "name": "spindle",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Async agent orchestration extension for pi",
   "type": "module",
   "main": "dist/index.js",
@@ -14,8 +14,8 @@
     "@mariozechner/pi-ai": "^0.58.1",
     "@mariozechner/pi-coding-agent": "^0.58.1",
     "@mariozechner/pi-tui": "^0.58.1",
-    "@sinclair/typebox": "^0.34.48",
-    "mcporter": "^0.7.3"
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "@sinclair/typebox": "^0.34.48"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

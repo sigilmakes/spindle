@@ -10,7 +10,11 @@ import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
 import { createDiff, retry, createContextTools } from "./builtins.js";
 import { setExtensionDir } from "./agents.js";
-import { mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup } from "./mcp.js";
+import {
+    mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup,
+    mcpInit, mcpGetPromptSummary, mcpReload, mcpGetServers,
+    type McpHandlers,
+} from "./mcp.js";
 import {
     subagent, killAllSubagents, getActiveSubagents, getSubagent,
     type SubagentHandle, type AgentResult, type SubagentOptions,
@@ -174,11 +178,12 @@ export default function spindle(pi: ExtensionAPI) {
                 "    blockers[], text, ok, cost, model, turns, toolCalls,",
                 "    durationMs, exitCode, branch?, worktree? }",
                 "",
-                "MCP:",
-                "  mcp()                       List MCP servers",
-                "  mcp('server')               List tools for a server",
-                "  mcp_call(server, tool, args) One-shot tool call",
-                "  mcp_connect(server)         Persistent proxy",
+                "MCP (servers discovered from ~/.pi/agent/mcp.json + .pi/mcp.json):",
+                "  mcp()                       List MCP servers with status",
+                "  mcp('server')               List tools (from cache or live)",
+                "  mcp('server', {schema:true}) Include parameter schemas",
+                "  mcp_call(server, tool, args) One-shot tool call (lazy connect)",
+                "  mcp_connect(server)         Persistent proxy with camelCase methods",
                 "  mcp_disconnect(server?)     Close connections",
                 "",
                 "Utilities:",
@@ -189,6 +194,8 @@ export default function spindle(pi: ExtensionAPI) {
                 "  /spindle list               Show active subagents",
                 "  /spindle reset              Reset REPL state",
                 "  /spindle config subModel <m> Set default subagent model",
+                "  /spindle mcp                List MCP servers",
+                "  /spindle mcp reload         Reload MCP config",
                 "",
                 "Scoping: const, let, var, and bare assignments persist across calls.",
             ].join("\n"),
@@ -202,6 +209,41 @@ export default function spindle(pi: ExtensionAPI) {
 
         widgetUi = ctx.ui;
 
+        // Initialize MCP with server→client handlers
+        const mcpHandlers: McpHandlers = {
+            onRoots: async () => ({
+                roots: [{ uri: `file://${ctx.cwd}`, name: path.basename(ctx.cwd) }],
+            }),
+            onElicitation: async (params) => {
+                if (!ctx.hasUI) return { action: "decline" as const };
+                const ok = await ctx.ui.confirm("MCP Server Request", params.message);
+                return { action: ok ? "accept" as const : "decline" as const };
+            },
+            // Sampling handler — routes to a notification for now.
+            // Full LLM routing requires deeper pi integration.
+            onSampling: async (params) => {
+                // For now, surface the request to the agent as a message
+                const systemPrompt = params.systemPrompt || "";
+                const lastMessage = Array.isArray(params.messages)
+                    ? params.messages[params.messages.length - 1]
+                    : undefined;
+                const text = typeof lastMessage === "object" && lastMessage !== null
+                    ? JSON.stringify(lastMessage)
+                    : String(lastMessage ?? "");
+
+                return {
+                    model: "spindle-passthrough",
+                    role: "assistant" as const,
+                    content: {
+                        type: "text" as const,
+                        text: `[Sampling requested by MCP server. System: ${systemPrompt}. Last message: ${text}]`,
+                    },
+                    stopReason: "endTurn",
+                };
+            },
+        };
+        mcpInit(ctx.cwd, mcpHandlers);
+
         // Restore config
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
@@ -212,6 +254,17 @@ export default function spindle(pi: ExtensionAPI) {
                 }
             }
         }
+    });
+
+    // --- MCP prompt injection ---
+
+    pi.on("before_agent_start", async (event, _ctx) => {
+        const summary = mcpGetPromptSummary();
+        if (!summary) return;
+
+        return {
+            systemPrompt: event.systemPrompt + "\n\n" + summary,
+        };
     });
 
     pi.on("session_shutdown", async () => {
@@ -257,6 +310,14 @@ export default function spindle(pi: ExtensionAPI) {
                 "  files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))",
                 "  workers = files.map(f => subagent(`Review ${f}`))",
                 "  results = await Promise.all(workers.map(w => w.result))",
+                "",
+                "MCP (these are spindle_exec builtins — all MCP calls go through the REPL):",
+                "  await mcp()                              // list servers",
+                "  await mcp('server')                      // list tools on a server",
+                "  r = await mcp_call('server', 'tool', {})  // one-shot call",
+                "  proxy = await mcp_connect('server')       // persistent proxy",
+                "  r = await proxy.toolName({args})          // camelCase method calls",
+                "  await mcp_disconnect('server')            // close connection",
                 "",
                 "const/let/var and bare assignments persist across calls.",
                 "",
@@ -424,10 +485,34 @@ export default function spindle(pi: ExtensionAPI) {
                     lines.push(`  ${h.task.slice(0, 80)}`);
                 }
                 ctx.ui.notify(lines.join("\n"), "info");
+            } else if (sub === "mcp") {
+                const mcpSub = parts[1]?.toLowerCase();
+                if (mcpSub === "reload") {
+                    await mcpReload(ctx.cwd);
+                    const servers = mcpGetServers();
+                    ctx.ui.notify(`MCP config reloaded. ${servers.size} server(s) configured.`, "info");
+                } else {
+                    // List servers
+                    const servers = mcpGetServers();
+                    if (servers.size === 0) {
+                        ctx.ui.notify("No MCP servers configured.\nConfig: ~/.pi/agent/mcp.json or .pi/mcp.json", "info");
+                    } else {
+                        const lines: string[] = [`MCP servers (${servers.size}):`];
+                        for (const [name, resolved] of servers) {
+                            let line = `  ${name} [${resolved.source}]`;
+                            if (resolved.entry.description) {
+                                line += ` — ${resolved.entry.description}`;
+                            }
+                            lines.push(line);
+                        }
+                        lines.push("", "Use /spindle mcp reload to refresh config.");
+                        ctx.ui.notify(lines.join("\n"), "info");
+                    }
+                }
             } else if (sub === "status") {
                 pi.sendUserMessage("Show Spindle status using the spindle_status tool.");
             } else if (!sub || sub === "help") {
-                ctx.ui.notify("Usage: /spindle <reset|config|status|attach|list>", "info");
+                ctx.ui.notify("Usage: /spindle <reset|config|mcp|status|attach|list>", "info");
             } else {
                 pi.sendUserMessage(`Use Spindle (spindle_exec) for this task:\n\n${args}`);
             }
@@ -442,6 +527,11 @@ export type { RetryOptions } from "./builtins.js";
 export { createToolWrappers, createFileIO, load, save } from "./tools.js";
 export { discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
 export type { SpindleExecDetails, SpindleStatusDetails } from "./render.js";
-export { mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup } from "./mcp.js";
+export {
+    mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup,
+    mcpInit, mcpGetPromptSummary, mcpReload, mcpGetServers,
+} from "./mcp.js";
+export type { McpHandlers } from "./mcp.js";
+export { loadMcpConfig, buildServerPromptSummary } from "./mcp-config.js";
 export { subagent, killAllSubagents, getActiveSubagents, getSubagent } from "./workers.js";
 export type { SubagentHandle, AgentResult, SubagentOptions } from "./workers.js";
