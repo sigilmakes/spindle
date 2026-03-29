@@ -311,7 +311,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "  workers = files.map(f => subagent(`Review ${f}`))",
                 "  results = await Promise.all(workers.map(w => w.result))",
                 "",
-                "MCP (call external tools/services — servers listed below):",
+                "MCP (these are spindle_exec builtins — all MCP calls go through the REPL):",
                 "  // Discover tools on a server:",
                 "  await mcp('context7')",
                 "",
