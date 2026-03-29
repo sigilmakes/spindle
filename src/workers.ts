@@ -282,6 +282,22 @@ function buildPiCommand(
 
     const promptParts: string[] = [];
     if (agentConfig?.systemPrompt?.trim()) promptParts.push(agentConfig.systemPrompt);
+
+    // Inject available agents so subagents know what they can spawn
+    if (agents.length > 0) {
+        const agentLines = agents.map((a) => {
+            const meta: string[] = [a.source];
+            if (a.model) meta.push(a.model);
+            if (a.tools?.length) meta.push(`tools: ${a.tools.join(", ")}`);
+            return `- **${a.name}** — ${a.description} (${meta.join(", ")})`;
+        });
+        promptParts.push(
+            `## Available subagent types\n\n` +
+            `Use \`{ agent: "name" }\` when spawning subagents to select a type:\n\n` +
+            agentLines.join("\n"),
+        );
+    }
+
     if (opts.systemPromptSuffix?.trim()) promptParts.push(opts.systemPromptSuffix);
 
     if (promptParts.length > 0) {
