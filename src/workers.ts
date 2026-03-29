@@ -471,3 +471,102 @@ export function killAllSubagents(): void {
 export function resetCounter(): void {
     counter = 0;
 }
+
+// ---------------------------------------------------------------------------
+// Worktree cleanup
+// ---------------------------------------------------------------------------
+
+export interface CleanupResult {
+    removedWorktrees: string[];
+    removedBranches: string[];
+    removedSessions: string[];
+    errors: string[];
+}
+
+/**
+ * Clean up orphaned spindle worktrees, branches, and tmux sessions.
+ * Only removes items that are not associated with active subagents.
+ */
+export function cleanupWorktrees(cwd: string): CleanupResult {
+    const result: CleanupResult = {
+        removedWorktrees: [],
+        removedBranches: [],
+        removedSessions: [],
+        errors: [],
+    };
+
+    const gitRoot = getGitRoot(cwd);
+    if (!gitRoot) return result;
+
+    // Collect active worktree paths and branches
+    const activeWorktrees = new Set<string>();
+    const activeBranches = new Set<string>();
+    const activeSessions = new Set<string>();
+    for (const [, handle] of active) {
+        if (handle.worktree) activeWorktrees.add(handle.worktree);
+        if (handle.branch) activeBranches.add(handle.branch);
+        activeSessions.add(handle.session);
+    }
+
+    // 1. Remove orphaned worktrees from .worktrees/
+    const worktreesDir = path.join(gitRoot, ".worktrees");
+    if (fs.existsSync(worktreesDir)) {
+        try {
+            for (const entry of fs.readdirSync(worktreesDir, { withFileTypes: true })) {
+                if (!entry.isDirectory()) continue;
+                const wtPath = path.join(worktreesDir, entry.name);
+                if (activeWorktrees.has(wtPath)) continue;
+
+                try {
+                    execSync(`git worktree remove ${JSON.stringify(wtPath)} --force`, {
+                        cwd: gitRoot, stdio: "pipe",
+                    });
+                    result.removedWorktrees.push(entry.name);
+                } catch (err: unknown) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    result.errors.push(`worktree ${entry.name}: ${msg}`);
+                }
+            }
+        } catch { /* .worktrees dir unreadable — skip */ }
+    }
+
+    // Also prune any worktrees git knows about but whose directories are gone
+    try {
+        execSync("git worktree prune", { cwd: gitRoot, stdio: "pipe" });
+    } catch { /* best effort */ }
+
+    // 2. Remove orphaned spindle/ branches
+    try {
+        const branches = execSync("git branch --list 'spindle/*'", {
+            cwd: gitRoot, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+        }).trim().split("\n").map(b => b.trim().replace(/^\*\s*/, "")).filter(Boolean);
+
+        for (const branch of branches) {
+            if (activeBranches.has(branch)) continue;
+            try {
+                execSync(`git branch -D ${JSON.stringify(branch)}`, {
+                    cwd: gitRoot, stdio: "pipe",
+                });
+                result.removedBranches.push(branch);
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                result.errors.push(`branch ${branch}: ${msg}`);
+            }
+        }
+    } catch { /* no spindle branches — fine */ }
+
+    // 3. Kill orphaned spindle tmux sessions
+    try {
+        const sessions = execSync("tmux list-sessions -F '#{session_name}'", {
+            encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+        }).trim().split("\n").filter(s => s.startsWith("spindle-"));
+
+        for (const session of sessions) {
+            if (activeSessions.has(session)) continue;
+            killTmuxSession(session);
+            result.removedSessions.push(session);
+        }
+    } catch { /* no tmux server — fine */ }
+
+    return result;
+}

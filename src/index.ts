@@ -17,6 +17,7 @@ import {
 } from "./mcp.js";
 import {
     subagent, killAllSubagents, getActiveSubagents, getSubagent,
+    cleanupWorktrees,
     type SubagentHandle, type AgentResult, type SubagentOptions,
 } from "./workers.js";
 import { startPoller, stopPoller } from "./poller.js";
@@ -244,6 +245,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "  /spindle attach <id>        Open subagent's tmux session",
                 "  /spindle list               Show active subagents",
                 "  /spindle reset              Reset REPL state",
+                "  /spindle cleanup            Remove orphaned worktrees, branches, tmux sessions",
                 "  /spindle config subModel <m> Set default subagent model",
                 "  /spindle mcp                List MCP servers",
                 "  /spindle mcp reload         Reload MCP config",
@@ -521,7 +523,7 @@ export default function spindle(pi: ExtensionAPI) {
     // --- /spindle command ---
 
     pi.registerCommand("spindle", {
-        description: "Spindle control — reset, config, attach to subagents, list subagents",
+        description: "Spindle control — reset, config, cleanup, attach, list, mcp",
         async handler(args, ctx) {
             const parts = args.trim().split(/\s+/);
             const sub = parts[0]?.toLowerCase();
@@ -600,10 +602,29 @@ export default function spindle(pi: ExtensionAPI) {
                         ctx.ui.notify(lines.join("\n"), "info");
                     }
                 }
+            } else if (sub === "cleanup" || sub === "clean") {
+                const result = cleanupWorktrees(ctx.cwd);
+                const lines: string[] = [];
+                if (result.removedWorktrees.length > 0) {
+                    lines.push(`Removed ${result.removedWorktrees.length} worktree(s): ${result.removedWorktrees.join(", ")}`);
+                }
+                if (result.removedBranches.length > 0) {
+                    lines.push(`Removed ${result.removedBranches.length} branch(es): ${result.removedBranches.join(", ")}`);
+                }
+                if (result.removedSessions.length > 0) {
+                    lines.push(`Killed ${result.removedSessions.length} tmux session(s): ${result.removedSessions.join(", ")}`);
+                }
+                if (result.errors.length > 0) {
+                    lines.push(`Errors: ${result.errors.join("; ")}`);
+                }
+                if (lines.length === 0) {
+                    lines.push("Nothing to clean up.");
+                }
+                ctx.ui.notify(lines.join("\n"), result.errors.length > 0 ? "warning" : "info");
             } else if (sub === "status") {
                 pi.sendUserMessage("Show Spindle status using the spindle_status tool.");
             } else if (!sub || sub === "help") {
-                ctx.ui.notify("Usage: /spindle <reset|config|mcp|status|attach|list>", "info");
+                ctx.ui.notify("Usage: /spindle <reset|config|cleanup|mcp|status|attach|list>", "info");
             } else {
                 pi.sendUserMessage(`Use Spindle (spindle_exec) for this task:\n\n${args}`);
             }
@@ -624,5 +645,5 @@ export {
 } from "./mcp.js";
 export type { McpHandlers } from "./mcp.js";
 export { loadMcpConfig, buildServerPromptSummary } from "./mcp-config.js";
-export { subagent, killAllSubagents, getActiveSubagents, getSubagent } from "./workers.js";
-export type { SubagentHandle, AgentResult, SubagentOptions } from "./workers.js";
+export { subagent, killAllSubagents, getActiveSubagents, getSubagent, cleanupWorktrees } from "./workers.js";
+export type { SubagentHandle, AgentResult, SubagentOptions, CleanupResult } from "./workers.js";

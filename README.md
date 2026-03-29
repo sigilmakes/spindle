@@ -171,6 +171,7 @@ Spawn a subagent. Returns `SubagentHandle` immediately.
 | `/spindle list` | Show active subagents |
 | `/spindle reset` | Reset REPL state |
 | `/spindle config subModel <model>` | Set default subagent model |
+| `/spindle cleanup` | Remove orphaned worktrees, branches, tmux sessions |
 | `/spindle mcp` | List MCP servers |
 | `/spindle mcp reload` | Reload MCP config |
 | `/spindle status` | Show REPL state |

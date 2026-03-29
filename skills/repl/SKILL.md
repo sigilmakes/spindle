@@ -95,6 +95,7 @@ await save("output.json", JSON.stringify(data))
 - `/spindle attach <id>` — open subagent's tmux session
 - `/spindle list` — show active subagents
 - `/spindle reset` — reset REPL state
+- `/spindle cleanup` — remove orphaned worktrees, branches, tmux sessions
 - `/spindle config subModel <model>` — default subagent model
 - `/spindle mcp` — list MCP servers
 - `/spindle mcp reload` — reload MCP config
