@@ -18,20 +18,53 @@ const STATUS_DIR = ".spindle";
 const STATUS_FILE = "status.json";
 
 const EPISODE_PROMPT = `
-After completing your task, end your response with a structured episode block.
-This block MUST be the last thing in your response.
+## You are a subagent
+
+You were spawned by a parent agent to complete a specific task. There is no human
+reading your response. The ONLY thing returned to the parent is the <episode>
+block below — everything you write outside it is discarded.
+
+This means:
+- Do NOT write prose, explanations, or commentary outside the episode block.
+- Do NOT address a human reader. There is none.
+- Work the task using tools, then write your episode. That's it.
+
+When you are done (or blocked), emit a single <episode> block as the LAST thing
+in your response. Put ALL important information inside it:
 
 <episode>
 status: success | failure | blocked
-summary: One paragraph describing what you accomplished and key conclusions.
+summary: |
+  Comprehensive description of what you did, what you found, and your conclusions.
+  This is the parent's ONLY window into your work — be thorough. Include key data
+  points, numbers, decisions made, and reasoning. Multiple sentences are expected.
+  If you investigated something, state what you learned, not just that you looked.
 findings:
-- Finding or deliverable 1
-- Finding or deliverable 2
+- Specific, self-contained finding with enough detail to be actionable
+- Include data: file paths, line numbers, error messages, measurements
+- Each finding should make sense without reading the summary
 artifacts:
-- path/to/file — what was created or modified
+- path/to/file — what was created or modified and why
 blockers:
-- (only if status is blocked) What's preventing progress
+- (only if status is blocked) Specific impediment with enough context to resolve it
 </episode>
+
+Bad episode (too vague — parent learns nothing):
+  summary: Looked at the code and found some issues.
+  findings:
+  - Found problems in auth module
+
+Good episode (specific — parent can act on this):
+  summary: |
+    Audited src/auth/ for token validation gaps. Found 3 issues: (1) JWT expiry
+    is checked but clock skew tolerance is 0, causing spurious 401s for clients
+    within ~1s of expiry. (2) refresh_token rotation is implemented but old tokens
+    aren't revoked until next cleanup cycle (24h window). (3) The HMAC comparison
+    in verify() uses === instead of timingSafeEqual, leaking timing information.
+  findings:
+  - src/auth/jwt.ts:47 — clock skew tolerance is 0s, should be 30-60s
+  - src/auth/refresh.ts:112 — old refresh tokens remain valid up to 24h after rotation
+  - src/auth/verify.ts:23 — string === comparison on HMAC, use crypto.timingSafeEqual
 `.trim();
 
 interface Episode {
@@ -58,6 +91,18 @@ interface StatusData {
     lastUpdate: number;
 }
 
+function parseSummary(block: string): string {
+    const summaryMatch = block.match(/summary:\s*(.+?)(?=\nfindings:|\nartifacts:|\nblockers:|\n*$)/is);
+    if (!summaryMatch) return "";
+    let raw = summaryMatch[1].trim();
+    // Handle YAML block-scalar style: "summary: |\n  indented lines"
+    if (raw.startsWith("|")) {
+        raw = raw.slice(1).trim();
+    }
+    // Collapse indented continuation lines into a single paragraph
+    return raw.replace(/\n\s*/g, " ").trim();
+}
+
 function parseEpisodeBlock(text: string): Episode | null {
     // Grab the LAST <episode> block (agent may quote the template)
     const allMatches = [...text.matchAll(/<episode>([\s\S]*?)<\/episode>/g)];
@@ -65,11 +110,10 @@ function parseEpisodeBlock(text: string): Episode | null {
 
     const block = allMatches[allMatches.length - 1][1];
     const statusMatch = block.match(/status:\s*(success|failure|blocked)/i);
-    const summaryMatch = block.match(/summary:\s*(.+?)(?=\nfindings:|\nartifacts:|\nblockers:|\n*$)/is);
 
     return {
         status: (statusMatch?.[1]?.toLowerCase() as Episode["status"]) || "success",
-        summary: summaryMatch?.[1]?.trim() || "",
+        summary: parseSummary(block),
         findings: parseList(block, "findings"),
         artifacts: parseList(block, "artifacts"),
         blockers: parseList(block, "blockers"),
