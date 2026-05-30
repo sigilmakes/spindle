@@ -5,6 +5,8 @@ export interface SpindleExecDetails {
     code: string;
     durationMs?: number;
     error?: boolean;
+    status?: "ok" | "aborted_by_user" | "runtime_error" | "process_terminated";
+    truncated?: boolean;
 }
 
 export interface SpindleStatusDetails {
@@ -47,6 +49,9 @@ export function formatExecResult(
     }
 
     let rendered = output;
+    if (details.truncated) {
+        rendered += "\n" + theme.fg("dim", "Result truncated — inspect _lastValue / _lastResult in the runtime.");
+    }
     if (details.durationMs !== undefined && details.durationMs > 1000) {
         rendered += "\n" + theme.fg("dim", `${(details.durationMs / 1000).toFixed(1)}s`);
     }

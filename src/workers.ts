@@ -1,43 +1,26 @@
-/**
- * Subagent management — async agents in tmux sessions with optional git worktree isolation.
- *
- * subagent() creates a tmux session (and optionally a worktree), starts a pi
- * process, and returns a handle immediately. The main agent keeps working.
- */
-
-import { execSync } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { discoverAgents, resolveAgent, getExtensionDir } from "./agents.js";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { EPISODE_PROMPT, parseEpisodeBlock } from "./episode.js";
 
 export type SubagentStatus = "running" | "done" | "crashed";
 
 export interface AgentResult {
-    // Episode
     status: "success" | "failure" | "blocked";
     summary: string;
     findings: string[];
     artifacts: string[];
     blockers: string[];
-
-    // Raw output
     text: string;
     ok: boolean;
-
-    // Execution metadata
     cost: number;
     model: string;
     turns: number;
     toolCalls: number;
     durationMs: number;
     exitCode: number;
-
-    // Worktree (undefined when worktree: false)
     branch?: string;
     worktree?: string;
 }
@@ -86,74 +69,51 @@ export interface SubagentHandle {
     readonly worktree?: string;
     readonly status: SubagentStatus;
     readonly result: Promise<AgentResult>;
-    /** Whether the result promise has been resolved. */
     readonly resolved: boolean;
-    /** Whether `.result` was accessed (someone will await it). */
     readonly awaited: boolean;
-    /** Directory where .spindle/status.json lives. */
     readonly statusDir: string;
-    /** Whether the startup grace period has elapsed. */
     readonly pastGrace: boolean;
     cancel(): Promise<void>;
-    /** @internal Resolve the result promise. Used by the poller. */
     _resolve(result: AgentResult): void;
 }
 
-// ---------------------------------------------------------------------------
-// Subagent Manager
-// ---------------------------------------------------------------------------
-
-let counter = 0;
-const active = new Map<string, SubagentHandleImpl>();
-
-/** Find the next available ID that doesn't collide with existing tmux sessions. */
-function nextId(): string {
-    while (true) {
-        const id = `w${counter++}`;
-        const session = `spindle-${id}`;
-        if (!tmuxSessionExists(session)) return id;
-        // Session exists from a previous run — skip it
-    }
+export interface CleanupResult {
+    removedWorktrees: string[];
+    removedBranches: string[];
+    removedSessions: string[];
+    errors: string[];
 }
 
-export interface SubagentCallbacks {
-    onStatusChange?: (handle: SubagentHandle) => void;
-    onDone?: (handle: SubagentHandle, result: AgentResult) => void;
-}
+const STATUS_DIR = ".spindle";
+const STATUS_FILE = "status.json";
 
-let callbacks: SubagentCallbacks = {};
+export { isTmuxPaneAlive, killTmuxSession };
 
-export function setSubagentCallbacks(cb: SubagentCallbacks): void {
-    callbacks = cb;
-}
-
-export function getActiveSubagents(): Map<string, SubagentHandle> {
-    return active as Map<string, SubagentHandle>;
-}
-
-export function getSubagent(id: string): SubagentHandle | undefined {
-    return active.get(id);
-}
-
-// ---------------------------------------------------------------------------
-// Git helpers
-// ---------------------------------------------------------------------------
-
-function getGitRoot(cwd: string): string | null {
+export function readStatusFile(dir: string): StatusFile | null {
+    const filePath = path.join(dir, STATUS_DIR, STATUS_FILE);
     try {
-        return execSync("git rev-parse --show-toplevel", { cwd, encoding: "utf-8" }).trim();
+        return JSON.parse(fs.readFileSync(filePath, "utf-8")) as StatusFile;
     } catch {
         return null;
     }
 }
 
-function createWorktree(gitRoot: string, id: string): { worktree: string; branch: string } {
-    const branch = `spindle/${id}`;
-    const worktreeDir = path.join(gitRoot, ".worktrees", id);
+function getGitRoot(cwd: string): string | null {
+    try {
+        return execSync("git rev-parse --show-toplevel", { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+    } catch {
+        return null;
+    }
+}
+
+function createWorktree(gitRoot: string, name: string): { worktree: string; branch: string } {
+    const safeName = (name || "spindle").replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const suffix = Date.now().toString(36);
+    const branch = `spindle/${safeName}-${suffix}`;
+    const worktreeDir = path.join(gitRoot, ".worktrees", `${safeName}-${suffix}`);
 
     fs.mkdirSync(path.join(gitRoot, ".worktrees"), { recursive: true });
 
-    // Add .worktrees to .gitignore if not already there
     const gitignorePath = path.join(gitRoot, ".gitignore");
     let gitignore = "";
     try { gitignore = fs.readFileSync(gitignorePath, "utf-8"); } catch {}
@@ -167,10 +127,6 @@ function createWorktree(gitRoot: string, id: string): { worktree: string; branch
 
     return { worktree: worktreeDir, branch };
 }
-
-// ---------------------------------------------------------------------------
-// Tmux helpers
-// ---------------------------------------------------------------------------
 
 function hasTmux(): boolean {
     try {
@@ -190,319 +146,285 @@ function tmuxSessionExists(session: string): boolean {
     }
 }
 
-function createTmuxSession(session: string, cwd: string, command: string): void {
-    execSync(
-        `tmux new-session -d -s ${JSON.stringify(session)} -c ${JSON.stringify(cwd)}`,
-        { stdio: "pipe" },
-    );
-    execSync(
-        `tmux send-keys -t ${JSON.stringify(session)} ${JSON.stringify(command)} Enter`,
-        { stdio: "pipe" },
-    );
-}
-
 function killTmuxSession(session: string): void {
     try {
         execSync(`tmux kill-session -t ${JSON.stringify(session)}`, { stdio: "pipe" });
     } catch {}
 }
 
-/** Check if the pi process is still running inside a tmux session's pane. */
 function isTmuxPaneAlive(session: string): boolean {
     try {
         const cmd = execSync(
             `tmux list-panes -t ${JSON.stringify(session)} -F "#{pane_current_command}"`,
             { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
         ).trim();
-        // If the current command is a shell (bash, zsh, fish, etc.), pi has exited
         return !/^(bash|zsh|fish|sh|dash)$/i.test(cmd);
     } catch {
         return false;
     }
 }
 
-// ---------------------------------------------------------------------------
-// Status file helpers
-// ---------------------------------------------------------------------------
-
-const STATUS_DIR = ".spindle";
-const STATUS_FILE = "status.json";
-
-export { isTmuxPaneAlive, killTmuxSession };
-
-export function readStatusFile(dir: string): StatusFile | null {
-    const filePath = path.join(dir, STATUS_DIR, STATUS_FILE);
-    try {
-        return JSON.parse(fs.readFileSync(filePath, "utf-8")) as StatusFile;
-    } catch {
-        return null;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Worker extension path
-// ---------------------------------------------------------------------------
-
-function getWorkerExtensionPath(): string {
+function getMainExtensionPath(): string {
     const extDir = getExtensionDir();
     if (!extDir) throw new Error("Spindle extension directory not set");
 
-    const jsPath = path.join(extDir, "worker-extension.js");
-    const tsPath = path.join(extDir, "worker-extension.ts");
+    const jsPath = path.join(extDir, "index.js");
+    const tsPath = path.join(extDir, "index.ts");
     if (fs.existsSync(jsPath)) return jsPath;
     if (fs.existsSync(tsPath)) return tsPath;
-
-    throw new Error(`Worker extension not found at ${jsPath} or ${tsPath}`);
+    throw new Error(`Spindle extension entry not found at ${jsPath} or ${tsPath}`);
 }
 
-// ---------------------------------------------------------------------------
-// Build pi command
-// ---------------------------------------------------------------------------
-
-function buildPiCommand(
-    task: string,
-    opts: SubagentOptions,
-    workerExtPath: string,
-    cwd: string,
-    statusDir: string,
-): string {
-    // SPINDLE_STATUS_DIR tells the worker extension where to write status.json
-    const envPrefix = `SPINDLE_STATUS_DIR=${JSON.stringify(statusDir)}`;
-    const args: string[] = [envPrefix, "pi", "--no-session"];
-    args.push("-e", workerExtPath);
-
+function buildSystemPrompt(cwd: string, opts: SubagentOptions): string | undefined {
+    const promptParts: string[] = [];
     const agents = discoverAgents(cwd);
     const agentConfig = opts.agent ? resolveAgent(agents, opts.agent) : undefined;
 
-    const model = opts.model ?? agentConfig?.model;
-    if (model) args.push("--model", model);
-
-    const tools = opts.tools ?? agentConfig?.tools;
-    if (tools?.length) args.push("--tools", tools.join(","));
-
-    const promptParts: string[] = [];
     if (agentConfig?.systemPrompt?.trim()) promptParts.push(agentConfig.systemPrompt);
-
-    // Inject available agents so subagents know what they can spawn
-    if (agents.length > 0) {
-        const agentLines = agents.map((a) => {
-            const meta: string[] = [a.source];
-            if (a.model) meta.push(a.model);
-            if (a.tools?.length) meta.push(`tools: ${a.tools.join(", ")}`);
-            return `- **${a.name}** — ${a.description} (${meta.join(", ")})`;
-        });
-        promptParts.push(
-            `## Available subagent types\n\n` +
-            `Use \`{ agent: "name" }\` when spawning subagents to select a type:\n\n` +
-            agentLines.join("\n"),
-        );
-    }
-
     if (opts.systemPromptSuffix?.trim()) promptParts.push(opts.systemPromptSuffix);
+    promptParts.push(EPISODE_PROMPT);
 
-    if (promptParts.length > 0) {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-sub-"));
-        const tmpFile = path.join(tmpDir, "prompt.md");
-        fs.writeFileSync(tmpFile, promptParts.join("\n\n"), { encoding: "utf-8", mode: 0o600 });
-        args.push("--append-system-prompt", tmpFile);
-    }
-
-    args.push(JSON.stringify(`Task: ${task}`));
-    return args.join(" ");
+    const combined = promptParts.filter(Boolean).join("\n\n").trim();
+    return combined || undefined;
 }
 
-// ---------------------------------------------------------------------------
-// SubagentHandle implementation
-// ---------------------------------------------------------------------------
+function extractLastAssistantText(messages: unknown[]): string {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i] as any;
+        if (msg?.role !== "assistant") continue;
+        for (const part of msg.content || []) {
+            if (part?.type === "text") return String(part.text || "");
+        }
+    }
+    return "";
+}
 
-function emptyResult(handle: SubagentHandleImpl, summary: string): AgentResult {
+async function runRpcAgent(
+    cwd: string,
+    task: string,
+    opts: SubagentOptions,
+    extensionPath: string,
+): Promise<{ text: string; exitCode: number; turns: number; toolCalls: number; cost: number; model: string }> {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "spindle-sub-"));
+    const promptFile = path.join(tempDir, "prompt.md");
+    const systemPrompt = buildSystemPrompt(cwd, opts);
+    if (systemPrompt) {
+        fs.writeFileSync(promptFile, systemPrompt, { encoding: "utf-8", mode: 0o600 });
+    }
+
+    const args = ["--mode", "rpc", "--no-session"];
+    const extensionRoot = path.dirname(path.dirname(extensionPath));
+    const normalizedCwd = path.resolve(cwd);
+    const normalizedExtensionRoot = path.resolve(extensionRoot);
+    if (!normalizedCwd.startsWith(normalizedExtensionRoot)) {
+        args.push("-e", extensionPath);
+    }
+    if (opts.model) args.push("--model", opts.model);
+    if (opts.tools?.length) args.push("--tools", opts.tools.join(","));
+    if (systemPrompt) args.push("--append-system-prompt", promptFile);
+
+    const proc = spawn("pi", args, {
+        cwd,
+        env: process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderr = "";
+    let assistantText = "";
+    let turns = 0;
+    let toolCalls = 0;
+    let cost = 0;
+    let model = "unknown";
+    let settled = false;
+    let promptAccepted = false;
+    let sawAgentEnd = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+        if (killTimer) clearTimeout(killTimer);
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    };
+
+    const send = (payload: Record<string, unknown>) => {
+        proc.stdin.write(JSON.stringify(payload) + "\n");
+    };
+
+    const finish = (
+        resolve: (value: { text: string; exitCode: number; turns: number; toolCalls: number; cost: number; model: string }) => void,
+        exitCode: number,
+    ) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ text: assistantText, exitCode, turns, toolCalls, cost, model });
+    };
+
+    const fail = (reject: (reason?: unknown) => void, reason: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(reason);
+    };
+
+    return await new Promise((resolve, reject) => {
+        let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+        if (opts.timeout && opts.timeout > 0) {
+            timeoutHandle = setTimeout(() => {
+                try { proc.kill("SIGTERM"); } catch {}
+            }, opts.timeout * 1000);
+        }
+
+        proc.stdout.on("data", (chunk) => {
+            stdoutBuf += chunk.toString("utf-8");
+            while (true) {
+                const idx = stdoutBuf.indexOf("\n");
+                if (idx < 0) break;
+                const line = stdoutBuf.slice(0, idx).replace(/\r$/, "");
+                stdoutBuf = stdoutBuf.slice(idx + 1);
+                if (!line.trim()) continue;
+
+                let msg: any;
+                try {
+                    msg = JSON.parse(line);
+                } catch {
+                    continue;
+                }
+
+                if (msg.type === "response" && msg.command === "prompt") {
+                    if (msg.success) {
+                        promptAccepted = true;
+                    } else {
+                        fail(reject, new Error(msg.error || "Subagent prompt rejected"));
+                        return;
+                    }
+                } else if (msg.type === "turn_end") {
+                    turns++;
+                    const usage = msg.message?.usage;
+                    if (usage?.cost?.total) cost += usage.cost.total;
+                    if (msg.message?.model && model === "unknown") model = msg.message.model;
+                    if (Array.isArray(msg.toolResults)) toolCalls += msg.toolResults.length;
+                } else if (msg.type === "tool_execution_end") {
+                    if (!Array.isArray(msg.toolResults)) toolCalls++;
+                } else if (msg.type === "agent_end") {
+                    sawAgentEnd = true;
+                    assistantText = extractLastAssistantText(msg.messages || []);
+                    try { proc.stdin.end(); } catch {}
+                    killTimer = setTimeout(() => {
+                        try { proc.kill("SIGTERM"); } catch {}
+                    }, 500);
+                } else if (msg.type === "extension_ui_request") {
+                    const method = String(msg.method || "");
+                    if (["select", "confirm", "input", "editor"].includes(method) && msg.id) {
+                        send({ type: "extension_ui_response", id: msg.id, cancelled: true });
+                    }
+                }
+            }
+        });
+
+        proc.stderr.on("data", (chunk) => {
+            stderr += chunk.toString("utf-8");
+        });
+
+        proc.on("error", (err) => {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            fail(reject, err);
+        });
+        proc.on("close", (code) => {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            if (!promptAccepted && stderr.trim()) {
+                fail(reject, new Error(stderr.trim()));
+                return;
+            }
+            if (!sawAgentEnd && stderr.trim()) {
+                assistantText = assistantText || stderr.trim();
+            }
+            finish(resolve, code ?? 1);
+        });
+
+        send({ id: "prompt-1", type: "prompt", message: task });
+    });
+}
+
+function buildResult(
+    text: string,
+    exitCode: number,
+    startTime: number,
+    turns: number,
+    toolCalls: number,
+    cost: number,
+    model: string,
+    branch?: string,
+    worktree?: string,
+): AgentResult {
+    const episode = parseEpisodeBlock(text);
+    const status = episode?.status || (exitCode === 0 ? "success" : "failure");
+    const summary = episode?.summary || text.trim() || (exitCode === 0 ? "Subagent completed." : "Subagent failed.");
     return {
-        status: "failure",
+        status,
         summary,
-        findings: [],
-        artifacts: [],
-        blockers: [],
-        text: "",
-        ok: false,
-        cost: 0,
-        model: "unknown",
-        turns: 0,
-        toolCalls: 0,
-        durationMs: Date.now() - handle.startTime,
-        exitCode: -1,
-        branch: handle.branch,
-        worktree: handle.worktree,
+        findings: episode?.findings || [],
+        artifacts: episode?.artifacts || [],
+        blockers: episode?.blockers || [],
+        text,
+        ok: status === "success",
+        cost,
+        model,
+        turns,
+        toolCalls,
+        durationMs: Date.now() - startTime,
+        exitCode,
+        branch,
+        worktree,
     };
 }
 
-class SubagentHandleImpl implements SubagentHandle {
-    readonly id: string;
-    readonly task: string;
-    readonly session: string;
-    readonly startTime: number;
-    readonly branch?: string;
-    readonly worktree?: string;
-    /** Directory where .spindle/status.json lives — worktree dir or cwd. */
-    readonly statusDir: string;
-    private _result: Promise<AgentResult>;
-    private _resolveResult!: (result: AgentResult) => void;
-    private _resolved = false;
-    private _resultAccessed = false;
-
-    /** Grace period (ms) before we start checking if the pane process is alive.
-     *  Needed because tmux send-keys hasn't launched pi yet when the poller first runs. */
-    static readonly STARTUP_GRACE_MS = 15_000;
-
-    constructor(
-        id: string, task: string, session: string,
-        statusDir: string, branch?: string, worktree?: string,
-    ) {
-        this.id = id;
-        this.task = task;
-        this.session = session;
-        this.startTime = Date.now();
-        this.statusDir = statusDir;
-        this.branch = branch;
-        this.worktree = worktree;
-        this._result = new Promise<AgentResult>((resolve) => {
-            this._resolveResult = resolve;
-        });
-    }
-
-    /** Whether the startup grace period has elapsed. */
-    get pastGrace(): boolean {
-        return Date.now() - this.startTime > SubagentHandleImpl.STARTUP_GRACE_MS;
-    }
-
-    get status(): SubagentStatus {
-        const sf = readStatusFile(this.statusDir);
-        if (sf) return sf.status;
-        if (!tmuxSessionExists(this.session)) return "crashed";
-        return "running";
-    }
-
-    get result(): Promise<AgentResult> {
-        this._resultAccessed = true;
-        return this._result;
-    }
-
-    /** True if `.result` was accessed — meaning someone will await it. */
-    get awaited(): boolean {
-        return this._resultAccessed;
-    }
-
-    _resolve(result: AgentResult): void {
-        if (this._resolved) return;
-        this._resolved = true;
-        this._resolveResult(result);
-    }
-
-    get resolved(): boolean {
-        return this._resolved;
-    }
-
-    async cancel(): Promise<void> {
-        killTmuxSession(this.session);
-        const result = emptyResult(this, "Cancelled by user");
-        this._resolve(result);
-        active.delete(this.id);
-        callbacks.onDone?.(this, result);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// subagent()
-// ---------------------------------------------------------------------------
-
-export function subagent(
+export async function subagent(
     task: string,
     opts: SubagentOptions = {},
     defaultCwd: string = process.cwd(),
     defaultModel?: string,
-): SubagentHandle {
-    if (!hasTmux()) {
-        throw new Error("tmux is required for subagents. Install tmux and try again.");
-    }
+): Promise<AgentResult> {
+    const startTime = Date.now();
+    const effectiveOpts = { ...opts, model: opts.model ?? defaultModel };
 
-    const id = nextId();
-    const sessionName = `spindle-${id}`;
-    const useWorktree = opts.worktree === true;
-
+    let cwd = defaultCwd;
     let branch: string | undefined;
-    let worktreeDir: string | undefined;
-    let statusDir: string;
-    let agentCwd: string;
+    let worktree: string | undefined;
 
-    if (useWorktree) {
+    if (effectiveOpts.worktree) {
         const gitRoot = getGitRoot(defaultCwd);
         if (!gitRoot) {
             throw new Error("Cannot create worktree: not in a git repository. Use { worktree: false }.");
         }
-        const wt = createWorktree(gitRoot, id);
-        worktreeDir = wt.worktree;
+        const wt = createWorktree(gitRoot, effectiveOpts.name || "spindle");
+        cwd = wt.worktree;
         branch = wt.branch;
-        statusDir = worktreeDir;
-        agentCwd = worktreeDir;
-    } else {
-        // Each non-worktree subagent gets a unique status directory
-        // so multiple subagents sharing a cwd don't clobber each other's status files.
-        statusDir = fs.mkdtempSync(path.join(os.tmpdir(), `spindle-status-${id}-`));
-        agentCwd = defaultCwd;
+        worktree = wt.worktree;
     }
 
-    const workerExtPath = getWorkerExtensionPath();
-    const command = buildPiCommand(
-        task,
-        { ...opts, model: opts.model ?? defaultModel },
-        workerExtPath,
-        agentCwd,
-        statusDir,
-    );
+    const extensionPath = getMainExtensionPath();
+    const { text, exitCode, turns, toolCalls, cost, model } = await runRpcAgent(cwd, task, effectiveOpts, extensionPath);
 
-    createTmuxSession(sessionName, agentCwd, command);
-
-    const handle = new SubagentHandleImpl(
-        id, task, sessionName, statusDir, branch, worktreeDir,
-    );
-    active.set(id, handle);
-    callbacks.onStatusChange?.(handle);
-
-    return handle;
+    return buildResult(text, exitCode, startTime, turns, toolCalls, cost, model, branch, worktree);
 }
 
-// ---------------------------------------------------------------------------
-// Cleanup
-// ---------------------------------------------------------------------------
-
 export function killAllSubagents(): void {
-    for (const [, handle] of active) {
-        if (!handle.resolved) {
-            killTmuxSession(handle.session);
-            handle._resolve(emptyResult(handle, "Session ended — subagent killed"));
-        }
-    }
-    active.clear();
+    // Synchronous subagents no longer keep background state in the main process.
 }
 
 export function resetCounter(): void {
-    counter = 0;
+    // Legacy no-op retained for tests.
 }
 
-// ---------------------------------------------------------------------------
-// Worktree cleanup
-// ---------------------------------------------------------------------------
-
-export interface CleanupResult {
-    removedWorktrees: string[];
-    removedBranches: string[];
-    removedSessions: string[];
-    errors: string[];
+export function getActiveSubagents(): Map<string, SubagentHandle> {
+    return new Map();
 }
 
-/**
- * Clean up orphaned spindle worktrees, branches, and tmux sessions.
- * Only removes items that are not associated with active subagents.
- */
+export function getSubagent(_id: string): SubagentHandle | undefined {
+    return undefined;
+}
+
 export function cleanupWorktrees(cwd: string): CleanupResult {
     const result: CleanupResult = {
         removedWorktrees: [],
@@ -514,25 +436,12 @@ export function cleanupWorktrees(cwd: string): CleanupResult {
     const gitRoot = getGitRoot(cwd);
     if (!gitRoot) return result;
 
-    // Collect active worktree paths and branches
-    const activeWorktrees = new Set<string>();
-    const activeBranches = new Set<string>();
-    const activeSessions = new Set<string>();
-    for (const [, handle] of active) {
-        if (handle.worktree) activeWorktrees.add(handle.worktree);
-        if (handle.branch) activeBranches.add(handle.branch);
-        activeSessions.add(handle.session);
-    }
-
-    // 1. Remove orphaned worktrees from .worktrees/
     const worktreesDir = path.join(gitRoot, ".worktrees");
     if (fs.existsSync(worktreesDir)) {
         try {
             for (const entry of fs.readdirSync(worktreesDir, { withFileTypes: true })) {
                 if (!entry.isDirectory()) continue;
                 const wtPath = path.join(worktreesDir, entry.name);
-                if (activeWorktrees.has(wtPath)) continue;
-
                 try {
                     execSync(`git worktree remove ${JSON.stringify(wtPath)} --force`, {
                         cwd: gitRoot, stdio: "pipe",
@@ -543,22 +452,19 @@ export function cleanupWorktrees(cwd: string): CleanupResult {
                     result.errors.push(`worktree ${entry.name}: ${msg}`);
                 }
             }
-        } catch { /* .worktrees dir unreadable — skip */ }
+        } catch {}
     }
 
-    // Also prune any worktrees git knows about but whose directories are gone
     try {
         execSync("git worktree prune", { cwd: gitRoot, stdio: "pipe" });
-    } catch { /* best effort */ }
+    } catch {}
 
-    // 2. Remove orphaned spindle/ branches
     try {
         const branches = execSync("git branch --list 'spindle/*'", {
             cwd: gitRoot, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-        }).trim().split("\n").map(b => b.trim().replace(/^\*\s*/, "")).filter(Boolean);
+        }).trim().split("\n").map((b) => b.trim().replace(/^\*\s*/, "")).filter(Boolean);
 
         for (const branch of branches) {
-            if (activeBranches.has(branch)) continue;
             try {
                 execSync(`git branch -D ${JSON.stringify(branch)}`, {
                     cwd: gitRoot, stdio: "pipe",
@@ -569,20 +475,20 @@ export function cleanupWorktrees(cwd: string): CleanupResult {
                 result.errors.push(`branch ${branch}: ${msg}`);
             }
         }
-    } catch { /* no spindle branches — fine */ }
+    } catch {}
 
-    // 3. Kill orphaned spindle tmux sessions
-    try {
-        const sessions = execSync("tmux list-sessions -F '#{session_name}'", {
-            encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-        }).trim().split("\n").filter(s => s.startsWith("spindle-"));
+    if (hasTmux()) {
+        try {
+            const sessions = execSync("tmux list-sessions -F '#{session_name}'", {
+                encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+            }).trim().split("\n").filter((s) => s.startsWith("spindle-"));
 
-        for (const session of sessions) {
-            if (activeSessions.has(session)) continue;
-            killTmuxSession(session);
-            result.removedSessions.push(session);
-        }
-    } catch { /* no tmux server — fine */ }
+            for (const session of sessions) {
+                killTmuxSession(session);
+                result.removedSessions.push(session);
+            }
+        } catch {}
+    }
 
     return result;
 }

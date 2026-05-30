@@ -4,17 +4,22 @@
 
 ### `spindle_exec`
 
-Execute JavaScript in a persistent REPL.
+Execute JavaScript in a persistent runtime with a proper Node environment.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `code` | string | JavaScript code to execute |
 
+Notes:
+- `require`, `process`, `Buffer`, `globalThis`, and dynamic `import()` are available
+- runtime variables persist across calls
+- after each call, `_last*` inspection variables are updated
+
 ### `spindle_status`
 
-Show REPL variables, active subagents, usage stats, and configuration. No parameters.
+Show runtime variables, usage stats, and configuration. No parameters.
 
-## REPL Builtins
+## Runtime Builtins
 
 ### Tool wrappers
 
@@ -37,63 +42,43 @@ load(path: string): Promise<string | Map<string, string>>
 save(path: string, content: string): Promise<void>
 ```
 
-### subagent()
+### `subagent()`
 
 ```typescript
-subagent(task: string, opts?: SubagentOptions): SubagentHandle
+subagent(task: string, opts?: SubagentOptions): Promise<AgentResult>
 ```
+
+Runs a child agent call **synchronously** and returns `AgentResult` directly.
 
 **SubagentOptions:**
 ```typescript
 {
     name?: string;
-    agent?: string;           // pre-defined agent name
+    agent?: string;
     model?: string;
     tools?: string[];
     timeout?: number;
-    worktree?: boolean;       // default: false
+    worktree?: boolean;
     systemPromptSuffix?: string;
-}
-```
-
-**SubagentHandle:**
-```typescript
-{
-    id: string;               // "w0", "w1", ...
-    task: string;
-    session: string;          // tmux session name
-    startTime: number;
-    branch?: string;          // git branch (if worktree: true)
-    worktree?: string;        // worktree path (if worktree: true)
-    status: SubagentStatus;   // "running" | "done" | "crashed"
-    result: Promise<AgentResult>;
-    cancel(): Promise<void>;
 }
 ```
 
 **AgentResult:**
 ```typescript
 {
-    // Episode (parsed from agent's <episode> block)
     status: "success" | "failure" | "blocked";
     summary: string;
     findings: string[];
     artifacts: string[];
     blockers: string[];
-
-    // Raw output
     text: string;
     ok: boolean;
-
-    // Metadata
     cost: number;
     model: string;
     turns: number;
     toolCalls: number;
     durationMs: number;
     exitCode: number;
-
-    // Worktree (undefined when worktree: false)
     branch?: string;
     worktree?: string;
 }
@@ -116,32 +101,42 @@ diff(a: string, b: string, opts?: { context?: number }): string
 retry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T>
 vars(): string[]
 clear(name?: string): string
+inspectVar(name: string, opts?: { depth?: number; maxChars?: number }): string
+keys(valueOrName: unknown, opts?: { limit?: number }): string[]
+shape(valueOrName: unknown): Record<string, unknown>
+sample(valueOrName: unknown, n?: number): unknown
+preview(valueOrName: unknown, opts?: { maxChars?: number }): string
 help(): string
 ```
 
-## Status File Protocol
+## Automatic last-result variables
 
-The worker extension writes `.spindle/status.json`:
+After every `spindle_exec` call, the runtime updates:
 
-```json
-{
-    "status": "done",
-    "exitCode": 0,
-    "summary": "Refactored auth module...",
-    "text": "Full raw output...",
-    "episode": {
-        "status": "success",
-        "summary": "Refactored auth module to use JWT...",
-        "findings": ["Replaced session auth with JWT", "Added refresh endpoint"],
-        "artifacts": ["src/auth.ts", "src/middleware/jwt.ts"],
-        "blockers": []
-    },
-    "startTime": 1711540000000,
-    "endTime": 1711540240000,
-    "turns": 8,
-    "toolCalls": 23,
-    "cost": 0.04,
-    "model": "claude-sonnet-4-20250514",
-    "lastUpdate": 1711540240000
-}
+```typescript
+_last
+_lastValue
+_lastResult
+_lastOutput
+_lastFullOutput
+_lastError
+_lastDurationMs
+_lastStatus
+_lastTruncated
 ```
+
+These are especially useful when output is truncated.
+
+## Runtime result status
+
+`Repl.exec()` normalizes outcomes with a status field:
+
+```typescript
+type ExecStatus =
+    | "ok"
+    | "aborted_by_user"
+    | "runtime_error"
+    | "process_terminated";
+```
+
+This status is exposed in `spindle_exec` details and mirrored into `_lastStatus`.

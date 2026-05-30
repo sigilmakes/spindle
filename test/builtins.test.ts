@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Repl } from "../src/repl.js";
-import { createDiff, retry, createContextTools } from "../src/builtins.js";
+import { createDiff, retry, createContextTools, createInspectionTools } from "../src/builtins.js";
 
 // ---------------------------------------------------------------------------
 // diff
@@ -288,5 +288,50 @@ describe("context management", () => {
         await repl.exec('clear("myVar")');
         const r2 = await repl.exec("console.log(JSON.stringify(vars()))");
         expect(r2.output).not.toContain("myVar");
+    });
+});
+
+describe("inspection helpers", () => {
+    let repl: Repl;
+    let inspectVar: (name: string, opts?: { depth?: number; maxChars?: number }) => string;
+    let keys: (valueOrName: unknown, opts?: { limit?: number }) => string[];
+    let shape: (valueOrName: unknown) => Record<string, unknown>;
+    let sample: (valueOrName: unknown, n?: number) => unknown;
+    let preview: (valueOrName: unknown, opts?: { maxChars?: number }) => string;
+
+    beforeEach(async () => {
+        repl = new Repl();
+        await repl.exec("items = [1, 2, 3, 4]");
+        await repl.exec('data = { alpha: 1, beta: 2, gamma: 3 }');
+        const tools = createInspectionTools(repl);
+        inspectVar = tools.inspectVar;
+        keys = tools.keys;
+        shape = tools.shape;
+        sample = tools.sample;
+        preview = tools.preview;
+    });
+
+    it("inspectVar renders a named variable", () => {
+        expect(inspectVar("items")).toContain("1");
+        expect(inspectVar("data")).toContain("alpha");
+    });
+
+    it("keys resolves variable names", () => {
+        expect(keys("data")).toEqual(["alpha", "beta", "gamma"]);
+    });
+
+    it("shape summarizes arrays and objects", () => {
+        expect(shape("items")).toMatchObject({ type: "array", length: 4 });
+        expect(shape("data")).toMatchObject({ type: "object", keyCount: 3 });
+    });
+
+    it("sample returns a subset of the value", () => {
+        expect(sample("items", 2)).toEqual([1, 2]);
+        expect(sample("data", 2)).toEqual({ alpha: 1, beta: 2 });
+    });
+
+    it("preview returns a compact string", () => {
+        expect(preview("items")).toContain("1");
+        expect(preview("data")).toContain("alpha");
     });
 });

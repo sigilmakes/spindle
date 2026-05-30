@@ -1,6 +1,6 @@
 # Spindle
 
-Async agent orchestration for [pi](https://github.com/badlogic/pi-mono). Persistent JavaScript REPL with async subagents in tmux sessions, full MCP protocol support, and optional git worktree isolation.
+Persistent JavaScript runtime for [pi](https://github.com/badlogic/pi-mono), with a **proper Node environment**, **sync subagents**, full MCP support, and optional git worktree isolation.
 
 ## Install
 
@@ -8,43 +8,107 @@ Async agent orchestration for [pi](https://github.com/badlogic/pi-mono). Persist
 pi install git:github.com/sigilmakes/spindle
 ```
 
+## What changed
+
+Spindle is no longer centered on async tmux subagents and a fake `vm` REPL.
+
+The current direction is:
+- a persistent JS runtime with real Node globals
+- `require`, `process`, `Buffer`, and dynamic `import()` work
+- subagents are **synchronous by default**
+- child execution uses **RPC**, not a poller and status-file loop
+- tmux is no longer the primary execution path
+
 ## Quick start
 
 ```js
-// Explore — no worktree needed
-r = await subagent("find all auth-related code in src/").result
-r.findings  // ["src/auth.ts handles JWT", "src/middleware/jwt.ts validates tokens"]
+// Real Node runtime
+fs = require('node:fs')
+path = await import('node:path')
+console.log(process.version)
 
-// Implement — worktree for isolation
-h = subagent("refactor auth to use JWT", { worktree: true })
-// main agent keeps working...
-r = await h.result
+// Sync subagent
+r = await subagent("find all auth-related code in src/")
+r.findings
+
+// Isolated implementation call
+r = await subagent("refactor auth to use JWT", { worktree: true })
 await bash({ command: `git merge ${r.branch}` })
 
-// Parallel from data
-files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))
-workers = files.map(f => subagent(`Review ${f}`))
-results = await Promise.all(workers.map(w => w.result))
-
-// MCP — call external tools
+// MCP
 r = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
 ```
 
 ## Architecture
 
-Every subagent runs in its own tmux session. Optionally gets a git worktree for filesystem isolation. Status is communicated via `.spindle/status.json` files written by a worker extension that hooks pi events. The main session polls these files to update a dashboard widget and send completion notifications.
-
-```
+```text
 Main pi session
-├── spindle_exec: h = subagent("task")
-│   ├── [if worktree] git worktree add .worktrees/w0 -b spindle/w0
-│   ├── tmux new-session -d -s spindle-w0
-│   │     └── pi -p --no-session -e worker-extension.ts "Task: ..."
-│   │           └── writes .spindle/status.json, parses <episode> block
-│   └── returns SubagentHandle immediately
-├── [agent works normally]
-├── [poller detects done → dashboard update + notification]
-└── spindle_exec: r = await h.result → AgentResult
+├── spindle_exec
+│   └── Persistent JS runtime (Node environment)
+│       ├── tool wrappers (read, bash, grep, ...)
+│       ├── file I/O helpers (load, save)
+│       ├── sync subagent(task, opts) -> AgentResult
+│       └── MCP builtins
+├── spindle_status
+└── /spindle command (reset, config, cleanup, mcp)
+
+Sync subagent call
+└── pi --mode rpc --no-session [...]
+    └── child session returns a structured <episode> block
+```
+
+## REPL / runtime
+
+Spindle's persistent runtime supports:
+- `require('node:fs')`
+- `await import('node:path')`
+- `process`, `Buffer`, `globalThis`
+- persistent variables across calls
+
+The runtime still provides built-in tool wrappers and helpers:
+- `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`
+- `load`, `save`
+- `subagent`
+- `mcp`, `mcp_call`, `mcp_connect`, `mcp_disconnect`
+- `sleep`, `diff`, `retry`, `vars`, `clear`
+- `inspectVar`, `keys`, `shape`, `sample`, `preview`, `help`
+
+When output is truncated, inspect it programmatically. The full result is still in runtime state:
+- `_last`, `_lastValue`, `_lastResult`
+- `_lastOutput`, `_lastFullOutput`
+- `_lastError`, `_lastDurationMs`, `_lastStatus`, `_lastTruncated`
+
+## Subagents
+
+### `subagent(task, opts?)`
+
+Runs a child agent call **synchronously** and returns an `AgentResult`.
+
+**Options:** `{ agent?, model?, tools?, timeout?, worktree?, name?, systemPromptSuffix? }`
+
+- `worktree: false` (default) — child works in the same directory
+- `worktree: true` — child gets its own git worktree + branch
+
+### `AgentResult`
+
+```ts
+{
+    status: "success" | "failure" | "blocked",
+    summary: string,
+    findings: string[],
+    artifacts: string[],
+    blockers: string[],
+    text: string,
+    ok: boolean,
+    cost: number,
+    model: string,
+    turns: number,
+    toolCalls: number,
+    durationMs: number,
+    exitCode: number,
+    branch?: string,
+    worktree?: string,
+}
 ```
 
 ## MCP Integration
@@ -71,114 +135,31 @@ Spindle includes a full MCP client built on the raw `@modelcontextprotocol/sdk`.
 }
 ```
 
-Server descriptions are injected into the system prompt so the agent knows what's available without discovery calls. Editor configs from Cursor, Claude Desktop, VS Code, Windsurf, and Codex are auto-imported.
-
 ### Usage
 
 ```js
-// Discover
 await mcp()                    // list servers with connection status
-await mcp("context7")          // list tools (from cache or live)
-
-// One-shot call (lazy-connects)
+await mcp("context7")         // list tools (from cache or live)
 r = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
 
-// Persistent proxy with camelCase methods
 c7 = await mcp_connect("context7")
 r = await c7.resolveLibraryId({ libraryName: "react" })
 await mcp_disconnect("context7")
 ```
 
-### Features
-
-- **Lazy connections** — connect on first call, idle disconnect after 10 min (configurable)
-- **Metadata caching** — tool discovery works without live connections
-- **Config layering** — project `.pi/mcp.json` > global `~/.pi/agent/mcp.json` > editor imports
-- **Progressive disclosure** — server descriptions in system prompt, drill down with `mcp("server")`
-- **Full protocol** — sampling, elicitation, and roots handlers for server→client requests
-
-### Commands
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/spindle mcp` | List configured servers |
-| `/spindle mcp reload` | Reload config files |
-
-## API
-
-### subagent(task, opts?)
-
-Spawn a subagent. Returns `SubagentHandle` immediately.
-
-**Options:** `{ agent?, model?, tools?, timeout?, worktree?, name?, systemPromptSuffix? }`
-
-- `worktree: false` (default) — subagent works in the same directory. Good for exploration.
-- `worktree: true` — subagent gets its own git worktree + branch. Required for writes that shouldn't conflict.
-
-### SubagentHandle
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `id` | string | `"w0"`, `"w1"`, ... |
-| `session` | string | tmux session name |
-| `branch` | string? | git branch (if worktree) |
-| `worktree` | string? | worktree path (if worktree) |
-| `task` | string | original task |
-| `status` | SubagentStatus | `"running"` \| `"done"` \| `"crashed"` |
-| `result` | Promise\<AgentResult\> | resolves when done |
-| `cancel()` | async | kill the subagent |
-
-### AgentResult
-
-```typescript
-{
-    status: "success" | "failure" | "blocked",
-    summary: string,
-    findings: string[],
-    artifacts: string[],
-    blockers: string[],
-    text: string,
-    ok: boolean,
-    cost: number,
-    model: string,
-    turns: number,
-    toolCalls: number,
-    durationMs: number,
-    exitCode: number,
-    branch?: string,
-    worktree?: string,
-}
-```
-
-### Other builtins
-
-| Builtin | Description |
-|---------|-------------|
-| `read/edit/write/bash/grep/find/ls` | Tool wrappers → ToolResult |
-| `load(path)` | File → string, dir → Map |
-| `save(path, content)` | Write without context |
-| `mcp()` | List MCP servers or tools |
-| `mcp_call(server, tool, args)` | One-shot MCP tool call |
-| `mcp_connect(server)` | Persistent MCP proxy |
-| `mcp_disconnect(server?)` | Close MCP connections |
-| `sleep/diff/retry/vars/clear/help` | Utilities |
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `/spindle attach <id>` | Open subagent's tmux session |
-| `/spindle list` | Show active subagents |
-| `/spindle reset` | Reset REPL state |
+| `/spindle reset` | Reset runtime state |
 | `/spindle config subModel <model>` | Set default subagent model |
 | `/spindle cleanup` | Remove orphaned worktrees, branches, tmux sessions |
 | `/spindle mcp` | List MCP servers |
 | `/spindle mcp reload` | Reload MCP config |
-| `/spindle status` | Show REPL state |
+| `/spindle status` | Show runtime state |
 
 ## Requirements
 
-- **tmux** — required
 - **git** — required for `worktree: true`
 - **pi** — the coding agent
 

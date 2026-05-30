@@ -1,14 +1,12 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
-import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionUIContext, Theme } from "@mariozechner/pi-coding-agent";
-import { Text, type TUI } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionUIContext } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
-import { createDiff, retry, createContextTools } from "./builtins.js";
+import { createDiff, retry, createContextTools, createInspectionTools } from "./builtins.js";
 import { setExtensionDir, discoverAgents } from "./agents.js";
 import {
     mcpList, mcpCall, mcpConnect, mcpDisconnect, mcpCleanup,
@@ -16,12 +14,9 @@ import {
     type McpHandlers,
 } from "./mcp.js";
 import {
-    subagent, killAllSubagents, getActiveSubagents, getSubagent,
-    cleanupWorktrees,
-    type SubagentHandle, type AgentResult, type SubagentOptions,
+    subagent, killAllSubagents, cleanupWorktrees,
+    type AgentResult, type SubagentOptions,
 } from "./workers.js";
-import { startPoller, stopPoller } from "./poller.js";
-import { renderDashboard } from "./dashboard.js";
 import {
     formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
@@ -34,23 +29,25 @@ setExtensionDir(__dirname);
 export default function spindle(pi: ExtensionAPI) {
     const BUILTIN_NAMES = new Set([
         "console", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
-        "Promise", "URL", "TextEncoder", "TextDecoder",
+        "Promise", "URL", "TextEncoder", "TextDecoder", "Buffer", "process", "require", "global", "globalThis",
         "read", "bash", "grep", "find", "edit", "write", "ls",
         "load", "save",
         "subagent",
         "mcp", "mcp_call", "mcp_connect", "mcp_disconnect",
-        "sleep", "diff", "retry", "vars", "clear", "help",
+        "sleep", "diff", "retry", "vars", "clear", "inspectVar", "keys", "shape", "sample", "preview", "help",
     ]);
 
     let repl: Repl | null = null;
     let cwd = process.cwd();
     let subModel: string | undefined;
+    const cumulativeUsage = { totalCost: 0, totalSubagents: 0 };
+    let currentSignal: AbortSignal | undefined;
+    let widgetUi: ExtensionUIContext | null = null;
 
-    // Discover available agent types for prompt guidelines
-    const agents = discoverAgents(cwd);
-    const agentGuidelineLines: string[] = [];
-    if (agents.length > 0) {
-        agentGuidelineLines.push(
+    function getAgentGuidelineLines(): string[] {
+        const agents = discoverAgents(cwd);
+        if (agents.length === 0) return [];
+        return [
             "",
             "Available subagent types (use { agent: \"name\" } option):",
             ...agents.map((a) => {
@@ -58,16 +55,8 @@ export default function spindle(pi: ExtensionAPI) {
                 if (a.model) meta.push(a.model);
                 return `  - ${a.name}: ${a.description} (${meta.join(", ")})`;
             }),
-        );
+        ];
     }
-
-    const cumulativeUsage = { totalCost: 0, totalSubagents: 0 };
-
-    let currentSignal: AbortSignal | undefined;
-
-    // Dashboard
-    let widgetUi: ExtensionUIContext | null = null;
-    let clearTimer: ReturnType<typeof setTimeout> | null = null;
 
     function updateSpindleStatus(): void {
         if (!widgetUi) return;
@@ -76,30 +65,16 @@ export default function spindle(pi: ExtensionAPI) {
 
         const servers = mcpGetServers();
         const connected = mcpGetConnectedCount();
-        const total = servers.size;
-        const subs = getActiveSubagents();
-        const activeSubs = subs.size;
-
         const parts: string[] = [];
 
-        // MCP status
-        if (total > 0) {
+        if (servers.size > 0) {
             if (connected > 0) {
-                parts.push(theme.fg("success", `MCP: ${connected}/${total}`));
+                parts.push(theme.fg("success", `MCP: ${connected}/${servers.size}`));
             } else {
-                parts.push(`MCP: ${total} server${total !== 1 ? "s" : ""}`);
+                parts.push(`MCP: ${servers.size} server${servers.size !== 1 ? "s" : ""}`);
             }
         }
 
-        // Subagent status
-        if (activeSubs > 0) {
-            const running = [...subs.values()].filter(h => !h.resolved).length;
-            if (running > 0) {
-                parts.push(theme.fg("warning", `● ${running} subagent${running > 1 ? "s" : ""}`));
-            }
-        }
-
-        // REPL status
         if (repl) {
             const vars = repl.getVariables();
             if (vars.length > 0) {
@@ -107,40 +82,7 @@ export default function spindle(pi: ExtensionAPI) {
             }
         }
 
-        if (parts.length > 0) {
-            widgetUi.setStatus("spindle", parts.join(theme.fg("dim", " · ")));
-        } else {
-            widgetUi.setStatus("spindle", "");
-        }
-    }
-
-    function updateDashboard(): void {
-        if (!widgetUi) return;
-        const subs = getActiveSubagents();
-        if (subs.size === 0) {
-            try { widgetUi.setWidget("spindle-subagents", undefined); } catch {}
-            return;
-        }
-
-        // Render once with current theme, pass as string array (no factory, no repeated renders)
-        const theme = widgetUi.theme;
-        if (!theme) return;
-        const widget = renderDashboard(subs, theme);
-        try {
-            widgetUi.setWidget("spindle-subagents", (_tui: TUI, _theme: Theme) => widget);
-        } catch {}
-
-        // Auto-clear after all done
-        const allDone = [...subs.values()].every(h => h.resolved);
-        if (allDone) {
-            if (clearTimer) clearTimeout(clearTimer);
-            clearTimer = setTimeout(() => {
-                try { widgetUi?.setWidget("spindle-subagents", undefined); } catch {}
-                clearTimer = null;
-            }, 5000);
-        } else {
-            if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
-        }
+        widgetUi.setStatus("spindle", parts.join(theme.fg("dim", " · ")));
     }
 
     function initRepl(workingDir: string): Repl {
@@ -152,49 +94,13 @@ export default function spindle(pi: ExtensionAPI) {
         const fileIO = createFileIO(cwd);
         r.inject({ load: fileIO.load, save: fileIO.save });
 
-        // --- subagent() ---
         r.inject({
-            subagent: (task: string, opts?: SubagentOptions) => {
-                const handle = subagent(task, opts || {}, cwd, subModel);
-
-                startPoller({
-                    onUpdate: () => updateDashboard(),
-                    onDone: (handle: SubagentHandle, result: AgentResult) => {
-                        cumulativeUsage.totalCost += result.cost;
-                        cumulativeUsage.totalSubagents++;
-
-                        // Only send notification for fire-and-forget subagents.
-                        // If .result was accessed (awaited), the caller already
-                        // gets the result directly — no need for a noisy followUp.
-                        if (!handle.awaited) {
-                            const duration = result.durationMs < 60000
-                                ? `${(result.durationMs / 1000).toFixed(0)}s`
-                                : `${(result.durationMs / 60000).toFixed(1)}m`;
-
-                            const icon = result.ok ? "✓" : "✗";
-                            let line = `${icon} **${handle.id}** finished (${duration}, ${result.status})`;
-                            if (result.branch) line += ` · \`${result.branch}\``;
-                            line += ` — $${result.cost.toFixed(2)}`;
-
-                            pi.sendMessage({
-                                customType: "spindle-subagent-done",
-                                content: line,
-                                display: true,
-                                details: result,
-                            }, {
-                                deliverAs: "followUp",
-                                triggerTurn: true,
-                            });
-                        }
-
-                        updateDashboard();
-                        updateSpindleStatus();
-                    },
-                });
-
-                updateDashboard();
+            subagent: async (task: string, opts?: SubagentOptions) => {
+                const result = await subagent(task, opts || {}, cwd, subModel);
+                cumulativeUsage.totalCost += result.cost;
+                cumulativeUsage.totalSubagents++;
                 updateSpindleStatus();
-                return handle;
+                return result;
             },
         });
 
@@ -202,7 +108,6 @@ export default function spindle(pi: ExtensionAPI) {
             sleep: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)),
         });
 
-        // MCP
         r.inject({
             mcp: mcpList,
             mcp_call: mcpCall,
@@ -210,15 +115,25 @@ export default function spindle(pi: ExtensionAPI) {
             mcp_disconnect: mcpDisconnect,
         });
 
-        // Utilities
         r.inject({ diff: createDiff(cwd), retry });
         const ctxTools = createContextTools(r, BUILTIN_NAMES);
-        r.inject({ vars: ctxTools.vars, clear: ctxTools.clear });
+        const inspectTools = createInspectionTools(r);
+        r.inject({
+            vars: ctxTools.vars,
+            clear: ctxTools.clear,
+            inspectVar: inspectTools.inspectVar,
+            keys: inspectTools.keys,
+            shape: inspectTools.shape,
+            sample: inspectTools.sample,
+            preview: inspectTools.preview,
+        });
 
-        // help()
         r.inject({
             help: () => [
-                "=== Spindle REPL ===",
+                "=== Spindle Node Runtime ===",
+                "",
+                "This is a persistent JavaScript runtime with a proper Node environment.",
+                "`require`, `process`, `Buffer`, `globalThis`, and dynamic `import()` all work.",
                 "",
                 "Tools (return ToolResult { output, error, ok, exitCode }):",
                 "  read({ path })              Read a file",
@@ -233,13 +148,8 @@ export default function spindle(pi: ExtensionAPI) {
                 "  load(path)                  File → string, directory → Map",
                 "  save(path, content)         Write without entering context",
                 "",
-                "Subagents (async, in tmux sessions):",
-                "  subagent(task, opts?)       Spawn subagent → SubagentHandle",
-                "  h.status                    'running' | 'done' | 'crashed'",
-                "  h.result                    Promise<AgentResult>",
-                "  h.branch                    Git branch (if worktree: true)",
-                "  h.cancel()                  Kill the subagent",
-                "",
+                "Subagents (sync by default):",
+                "  r = await subagent(task, opts?)   // returns AgentResult",
                 "  opts: { agent, model, tools, timeout, worktree, name }",
                 "  AgentResult: { status, summary, findings[], artifacts[],",
                 "    blockers[], text, ok, cost, model, turns, toolCalls,",
@@ -248,18 +158,21 @@ export default function spindle(pi: ExtensionAPI) {
                 "MCP (servers discovered from ~/.pi/agent/mcp.json + .pi/mcp.json):",
                 "  mcp()                       List MCP servers with status",
                 "  mcp('server')               List tools (from cache or live)",
-                "  mcp('server', {schema:true}) Include parameter schemas",
                 "  mcp_call(server, tool, args) One-shot tool call (lazy connect)",
                 "  mcp_connect(server)         Persistent proxy with camelCase methods",
                 "  mcp_disconnect(server?)     Close connections",
                 "",
                 "Utilities:",
-                "  sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(), help()",
+                "  sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(),",
+                "  inspectVar(name), keys(valueOrName), shape(valueOrName),",
+                "  sample(valueOrName, n?), preview(valueOrName, opts?), help()",
+                "",
+                "Automatic last-result vars after every spindle_exec call:",
+                "  _last, _lastValue, _lastResult, _lastOutput, _lastFullOutput,",
+                "  _lastError, _lastDurationMs, _lastStatus, _lastTruncated",
                 "",
                 "Commands:",
-                "  /spindle attach <id>        Open subagent's tmux session",
-                "  /spindle list               Show active subagents",
-                "  /spindle reset              Reset REPL state",
+                "  /spindle reset              Reset runtime state",
                 "  /spindle cleanup            Remove orphaned worktrees, branches, tmux sessions",
                 "  /spindle config subModel <m> Set default subagent model",
                 "  /spindle mcp                List MCP servers",
@@ -274,10 +187,8 @@ export default function spindle(pi: ExtensionAPI) {
 
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
-
         widgetUi = ctx.ui;
 
-        // Initialize MCP with server→client handlers
         const mcpHandlers: McpHandlers = {
             onRoots: async () => ({
                 roots: [{ uri: `file://${ctx.cwd}`, name: path.basename(ctx.cwd) }],
@@ -287,10 +198,7 @@ export default function spindle(pi: ExtensionAPI) {
                 const ok = await ctx.ui.confirm("MCP Server Request", params.message);
                 return { action: ok ? "accept" as const : "decline" as const };
             },
-            // Sampling handler — routes to a notification for now.
-            // Full LLM routing requires deeper pi integration.
             onSampling: async (params) => {
-                // For now, surface the request to the agent as a message
                 const systemPrompt = params.systemPrompt || "";
                 const lastMessage = Array.isArray(params.messages)
                     ? params.messages[params.messages.length - 1]
@@ -312,7 +220,6 @@ export default function spindle(pi: ExtensionAPI) {
         };
         mcpInit(ctx.cwd, mcpHandlers);
 
-        // --- MCP startup listing ---
         if (ctx.hasUI) {
             const servers = mcpGetServers();
             if (servers.size > 0) {
@@ -321,9 +228,7 @@ export default function spindle(pi: ExtensionAPI) {
                 const importedServers: string[] = [];
 
                 for (const [name, resolved] of servers) {
-                    const desc = resolved.entry.description
-                        ? ` — ${resolved.entry.description}`
-                        : "";
+                    const desc = resolved.entry.description ? ` — ${resolved.entry.description}` : "";
                     const line = `      ${name}${desc}`;
                     if (resolved.source === "project") projectServers.push(line);
                     else if (resolved.source === "global") globalServers.push(line);
@@ -332,25 +237,19 @@ export default function spindle(pi: ExtensionAPI) {
 
                 const lines: string[] = ["[MCP Servers]"];
                 if (projectServers.length > 0) {
-                    lines.push("  project");
-                    lines.push(...projectServers);
+                    lines.push("  project", ...projectServers);
                 }
                 if (globalServers.length > 0) {
-                    lines.push("  global");
-                    lines.push(...globalServers);
+                    lines.push("  global", ...globalServers);
                 }
                 if (importedServers.length > 0) {
-                    lines.push("  imported");
-                    lines.push(...importedServers);
+                    lines.push("  imported", ...importedServers);
                 }
                 ctx.ui.notify(lines.join("\n"), "info");
             }
-
-            // Initial status bar
             updateSpindleStatus();
         }
 
-        // Restore config
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
             const entry = entries[i];
@@ -363,8 +262,6 @@ export default function spindle(pi: ExtensionAPI) {
         }
     });
 
-    // --- MCP prompt injection ---
-
     pi.on("before_agent_start", async (event, _ctx) => {
         const summary = mcpGetPromptSummary();
         if (!summary) return;
@@ -376,20 +273,15 @@ export default function spindle(pi: ExtensionAPI) {
 
     pi.on("session_shutdown", async () => {
         killAllSubagents();
-        stopPoller();
-        if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
-        try { widgetUi?.setWidget("spindle-subagents", undefined); } catch {}
         widgetUi = null;
         await mcpCleanup();
         repl = null;
     });
 
-    // --- spindle_exec ---
-
     pi.registerTool({
         name: "spindle_exec",
         label: "Spindle",
-        description: "Execute JavaScript in a persistent REPL with built-in tools, async subagents, and MCP.",
+        description: "Execute JavaScript in a persistent Node runtime with built-in tools, sync subagents, and MCP.",
         parameters: Type.Object({
             code: Type.String({ description: "JavaScript code to execute" }),
         }),
@@ -402,23 +294,23 @@ export default function spindle(pi: ExtensionAPI) {
                 "  ✗ bash({command: \"find src -name '*.ts' | xargs grep 'export'\"})  ← shell for data",
                 "  ✓ hits = await grep({pattern: 'export class', path: 'src/'})       ← builtin + JS",
                 "",
-                "Subagents (async, in tmux sessions):",
-                "  h = subagent('refactor auth module', { worktree: true })",
-                "  // returns immediately — main agent keeps working",
-                "  r = await h.result   // AgentResult with episode data",
-                "  r.findings, r.artifacts, r.blockers, r.summary, r.status",
+                "This runtime is proper Node, not a vm sandbox:",
+                "  fs = require('node:fs')",
+                "  path = require('node:path')",
+                "  mod = await import('node:os')",
+                "  console.log(process.version)",
+                "",
+                "If output is truncated, inspect it programmatically — the full result is still in:",
+                "  _lastValue, _lastResult, _lastFullOutput",
+                "  preview(_lastValue), shape(_lastValue), keys(_lastValue), sample(_lastValue)",
+                "",
+                "Subagents are sync by default:",
+                "  r = await subagent('find all auth code')",
+                "  r.findings",
+                "  r = await subagent('refactor auth module', { worktree: true })",
                 "  await bash({ command: `git merge ${r.branch}` })",
                 "",
-                "  // Explore without worktree:",
-                "  r = await subagent('find all auth code').result",
-                "  r.findings  // what the subagent found",
-                "",
-                "  // From data:",
-                "  files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))",
-                "  workers = files.map(f => subagent(`Review ${f}`))",
-                "  results = await Promise.all(workers.map(w => w.result))",
-                "",
-                "MCP (these are spindle_exec builtins — all MCP calls go through the REPL):",
+                "MCP (these are spindle_exec builtins — all MCP calls go through the runtime):",
                 "  await mcp()                              // list servers",
                 "  await mcp('server')                      // list tools on a server",
                 "  r = await mcp_call('server', 'tool', {})  // one-shot call",
@@ -430,11 +322,11 @@ export default function spindle(pi: ExtensionAPI) {
                 "",
                 "Builtins: read, edit, write, bash, grep, find, ls, load, save,",
                 "  subagent, mcp, mcp_call, mcp_connect, mcp_disconnect,",
-                "  sleep, diff, retry, vars, clear, help",
-                ...agentGuidelineLines,
+                "  sleep, diff, retry, vars, clear, inspectVar, keys, shape,",
+                "  sample, preview, help",
+                ...getAgentGuidelineLines(),
             ].join("\n"),
         ],
-
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
             if (!repl) repl = initRepl(ctx.cwd);
 
@@ -451,10 +343,16 @@ export default function spindle(pi: ExtensionAPI) {
 
             try {
                 const result = await repl.exec(code, { signal });
-
                 const parts: string[] = [];
                 if (result.output) parts.push(result.output);
-                if (result.error) parts.push(`Error: ${result.error}`);
+                if (result.error) parts.push(`Error (${result.status}): ${result.error}`);
+                if (result.truncated) {
+                    parts.push([
+                        "",
+                        `Output truncated. The full result is still in REPL state: _lastValue / _lastResult / _lastFullOutput.`,
+                        `Inspect it with preview(_lastValue), shape(_lastValue), keys(_lastValue), sample(_lastValue), or inspectVar('_lastResult').`,
+                    ].join("\n"));
+                }
 
                 return {
                     content: [{ type: "text", text: parts.join("\n") || "(no output)" }],
@@ -462,6 +360,8 @@ export default function spindle(pi: ExtensionAPI) {
                         code,
                         durationMs: result.durationMs,
                         error: !!result.error,
+                        status: result.status,
+                        truncated: result.truncated,
                     } satisfies SpindleExecDetails,
                     isError: !!result.error,
                 };
@@ -470,37 +370,23 @@ export default function spindle(pi: ExtensionAPI) {
                 updateSpindleStatus();
             }
         },
-
         renderCall(args, theme) {
             return new Text(formatCodeForDisplay(args.code || "", theme), 0, 0);
         },
-
         renderResult(result, options, theme) {
             return new Text(formatExecResult(result as AgentToolResult<SpindleExecDetails>, options.expanded, theme), 0, 0);
         },
     });
 
-    // --- spindle_status ---
-
     pi.registerTool({
         name: "spindle_status",
         label: "Spindle Status",
-        description: "Show REPL variables, active subagents, usage stats, and configuration.",
+        description: "Show runtime variables, usage stats, and configuration.",
         parameters: Type.Object({}),
-
         async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
             if (!repl) repl = initRepl(ctx.cwd);
 
             const variables = repl.getVariables();
-            const subs = getActiveSubagents();
-
-            const subLines: string[] = [];
-            for (const [, h] of subs) {
-                const elapsed = Date.now() - h.startTime;
-                const dur = elapsed < 60000 ? `${(elapsed / 1000).toFixed(0)}s` : `${(elapsed / 60000).toFixed(1)}m`;
-                subLines.push(`  ${h.id}: ${h.status} (${dur}) — ${h.task.slice(0, 60)}`);
-            }
-
             const details: SpindleStatusDetails = {
                 variables,
                 usage: { ...cumulativeUsage },
@@ -511,21 +397,22 @@ export default function spindle(pi: ExtensionAPI) {
                 ? variables.map(v => `  ${v.name}: ${v.type} = ${v.preview}`).join("\n")
                 : "  (none)";
 
-            const p = ["Spindle Status", "", "Variables:", varSummary, ""];
-            if (subLines.length > 0) {
-                p.push("Subagents:", ...subLines, "");
-            }
-            p.push(
+            const p = [
+                "Spindle Status",
+                "",
+                "Variables:",
+                varSummary,
+                "",
                 `Usage: ${cumulativeUsage.totalSubagents} subagent calls, $${cumulativeUsage.totalCost.toFixed(4)}`,
                 `Config: sub-model=${subModel || "(default)"}`,
-            );
+                `Last vars: _lastValue, _lastResult, _lastOutput, _lastError, _lastStatus`,
+            ];
 
             return {
                 content: [{ type: "text", text: p.join("\n") }],
                 details,
             };
         },
-
         renderResult(result, _options, theme) {
             const details = result.details as SpindleStatusDetails;
             if (!details) {
@@ -536,8 +423,6 @@ export default function spindle(pi: ExtensionAPI) {
         },
     });
 
-    // --- /spindle command ---
-
     pi.registerCommand("spindle", {
         description: "Spindle control — reset, config, cleanup, attach, list, mcp",
         async handler(args, ctx) {
@@ -546,7 +431,7 @@ export default function spindle(pi: ExtensionAPI) {
 
             if (sub === "reset") {
                 repl?.reset();
-                ctx.ui.notify("Spindle REPL reset", "info");
+                ctx.ui.notify("Spindle runtime reset", "info");
             } else if (sub === "config") {
                 const key = parts[1]?.toLowerCase();
                 const value = parts.slice(2).join(" ");
@@ -557,43 +442,8 @@ export default function spindle(pi: ExtensionAPI) {
                 } else {
                     ctx.ui.notify("Usage: /spindle config subModel <value>", "warning");
                 }
-            } else if (sub === "attach") {
-                const id = parts[1];
-                if (!id) {
-                    ctx.ui.notify("Usage: /spindle attach <id>", "warning");
-                    return;
-                }
-                const handle = getSubagent(id);
-                if (!handle) {
-                    ctx.ui.notify(`No subagent: ${id}`, "error");
-                    return;
-                }
-                if (process.env.TMUX) {
-                    try {
-                        execSync(`tmux switch-client -t ${JSON.stringify(handle.session)}`, { stdio: "pipe" });
-                        ctx.ui.notify(`Switched to ${handle.session}`, "info");
-                    } catch {
-                        ctx.ui.notify(`Run: tmux attach -t ${handle.session}`, "info");
-                    }
-                } else {
-                    ctx.ui.notify(`Run: tmux attach -t ${handle.session}`, "info");
-                }
-            } else if (sub === "list") {
-                const subs = getActiveSubagents();
-                if (subs.size === 0) {
-                    ctx.ui.notify("No active subagents", "info");
-                    return;
-                }
-                const lines: string[] = [];
-                for (const [, h] of subs) {
-                    const elapsed = Date.now() - h.startTime;
-                    const dur = elapsed < 60000 ? `${(elapsed / 1000).toFixed(0)}s` : `${(elapsed / 60000).toFixed(1)}m`;
-                    const resolved = h.resolved;
-                    const icon = resolved ? "✓" : "⏳";
-                    lines.push(`${icon} ${h.id} (${dur}) tmux:${h.session}${h.branch ? ` branch:${h.branch}` : ""}`);
-                    lines.push(`  ${h.task.slice(0, 80)}`);
-                }
-                ctx.ui.notify(lines.join("\n"), "info");
+            } else if (sub === "attach" || sub === "list") {
+                ctx.ui.notify("Subagents are synchronous now. tmux is no longer the primary execution path.", "info");
             } else if (sub === "mcp") {
                 const mcpSub = parts[1]?.toLowerCase();
                 if (mcpSub === "reload") {
@@ -601,7 +451,6 @@ export default function spindle(pi: ExtensionAPI) {
                     const servers = mcpGetServers();
                     ctx.ui.notify(`MCP config reloaded. ${servers.size} server(s) configured.`, "info");
                 } else {
-                    // List servers
                     const servers = mcpGetServers();
                     if (servers.size === 0) {
                         ctx.ui.notify("No MCP servers configured.\nConfig: ~/.pi/agent/mcp.json or .pi/mcp.json", "info");
@@ -648,9 +497,8 @@ export default function spindle(pi: ExtensionAPI) {
     });
 }
 
-// Exports
 export { Repl } from "./repl.js";
-export { createDiff, retry, createContextTools } from "./builtins.js";
+export { createDiff, retry, createContextTools, createInspectionTools } from "./builtins.js";
 export type { RetryOptions } from "./builtins.js";
 export { createToolWrappers, createFileIO, load, save } from "./tools.js";
 export { discoverAgents, resolveAgent, setExtensionDir, getExtensionDir } from "./agents.js";
@@ -661,5 +509,6 @@ export {
 } from "./mcp.js";
 export type { McpHandlers } from "./mcp.js";
 export { loadMcpConfig, buildServerPromptSummary } from "./mcp-config.js";
-export { subagent, killAllSubagents, getActiveSubagents, getSubagent, cleanupWorktrees } from "./workers.js";
-export type { SubagentHandle, AgentResult, SubagentOptions, CleanupResult } from "./workers.js";
+export { subagent, killAllSubagents, getActiveSubagents, getSubagent, cleanupWorktrees, readStatusFile, isTmuxPaneAlive, killTmuxSession } from "./workers.js";
+export type { SubagentHandle, AgentResult, SubagentOptions, CleanupResult, StatusFile } from "./workers.js";
+export { EPISODE_PROMPT, parseEpisodeBlock } from "./episode.js";

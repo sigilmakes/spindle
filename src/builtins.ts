@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { inspect } from "node:util";
 import type { Repl } from "./repl.js";
 
 // ---------------------------------------------------------------------------
@@ -108,14 +109,18 @@ export async function retry<T>(
 
 export function createContextTools(repl: Repl, builtinNames: Set<string>) {
     const context = repl.getContext();
+    const effectiveBuiltins = new Set([
+        ...builtinNames,
+        "Buffer", "process", "require", "global", "globalThis",
+    ]);
 
     function vars(): string[] {
-        return Object.keys(context).filter(k => !builtinNames.has(k));
+        return Object.keys(context).filter(k => !effectiveBuiltins.has(k));
     }
 
     function clear(varName?: string): string {
         if (varName !== undefined) {
-            if (builtinNames.has(varName)) {
+            if (effectiveBuiltins.has(varName)) {
                 return `Cannot clear builtin: ${varName}`;
             }
             delete context[varName];
@@ -128,4 +133,88 @@ export function createContextTools(repl: Repl, builtinNames: Set<string>) {
     }
 
     return { vars, clear };
+}
+
+// ---------------------------------------------------------------------------
+// Inspection helpers
+// ---------------------------------------------------------------------------
+
+function resolveVar(context: Record<string, unknown>, valueOrName: unknown): unknown {
+    if (typeof valueOrName === "string" && valueOrName in context) {
+        return context[valueOrName];
+    }
+    return valueOrName;
+}
+
+function previewText(value: unknown, maxChars: number = 400): string {
+    let text: string;
+    if (typeof value === "string") text = value;
+    else text = inspect(value, { depth: 3, breakLength: 100, maxArrayLength: 20 });
+    if (text.length <= maxChars) return text;
+    return text.slice(0, maxChars) + `... [${text.length} chars total]`;
+}
+
+function sampleValue(value: unknown, count: number = 5): unknown {
+    if (Array.isArray(value)) return value.slice(0, count);
+    if (typeof value === "string") return value.slice(0, count);
+    if (value instanceof Map) return Array.from(value.entries()).slice(0, count);
+    if (value instanceof Set) return Array.from(value.values()).slice(0, count);
+    if (value && typeof value === "object") {
+        return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, count));
+    }
+    return value;
+}
+
+function shapeOf(value: unknown): Record<string, unknown> {
+    if (value === null) return { type: "null" };
+    if (value === undefined) return { type: "undefined" };
+    if (typeof value === "string") return { type: "string", length: value.length };
+    if (Array.isArray(value)) return { type: "array", length: value.length, sample: value.slice(0, 3) };
+    if (value instanceof Map) return { type: "map", size: value.size, sample: Array.from(value.keys()).slice(0, 5) };
+    if (value instanceof Set) return { type: "set", size: value.size, sample: Array.from(value.values()).slice(0, 5) };
+    if (typeof value === "function") return { type: "function", name: value.name || "anonymous" };
+    if (typeof value === "object") {
+        const entries = Object.entries(value as Record<string, unknown>);
+        return {
+            type: "object",
+            keys: entries.slice(0, 10).map(([key]) => key),
+            keyCount: entries.length,
+        };
+    }
+    return { type: typeof value, value };
+}
+
+export function createInspectionTools(repl: Repl) {
+    const context = repl.getContext();
+
+    function inspectVar(name: string, opts?: { depth?: number; maxChars?: number }): string {
+        if (!(name in context)) return `Unknown variable: ${name}`;
+        const value = context[name];
+        const rendered = inspect(value, { depth: opts?.depth ?? 3, breakLength: 100, maxArrayLength: 50 });
+        return previewText(rendered, opts?.maxChars ?? 1200);
+    }
+
+    function keys(valueOrName: unknown, opts?: { limit?: number }): string[] {
+        const value = resolveVar(context, valueOrName);
+        const limit = Math.max(1, opts?.limit ?? 20);
+        if (Array.isArray(value)) return value.slice(0, limit).map((_, i) => String(i));
+        if (value instanceof Map) return Array.from(value.keys()).slice(0, limit).map((k) => String(k));
+        if (value instanceof Set) return Array.from(value.values()).slice(0, limit).map((v) => String(v));
+        if (value && typeof value === "object") return Object.keys(value as Record<string, unknown>).slice(0, limit);
+        return [];
+    }
+
+    function shape(valueOrName: unknown): Record<string, unknown> {
+        return shapeOf(resolveVar(context, valueOrName));
+    }
+
+    function sample(valueOrName: unknown, n?: number): unknown {
+        return sampleValue(resolveVar(context, valueOrName), n ?? 5);
+    }
+
+    function preview(valueOrName: unknown, opts?: { maxChars?: number }): string {
+        return previewText(resolveVar(context, valueOrName), opts?.maxChars ?? 400);
+    }
+
+    return { inspectVar, keys, shape, sample, preview };
 }

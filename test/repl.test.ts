@@ -253,6 +253,22 @@ describe("Repl", () => {
         });
     });
 
+    describe("last-result variables", () => {
+        it("stores last execution data in context", async () => {
+            const result = await repl.exec("x = { a: 1, b: 2 }");
+            expect(result.status).toBe("ok");
+            const check = await repl.exec("console.log(_lastValue.a, _lastStatus, _lastTruncated)");
+            expect(check.output).toBe("1 ok false");
+        });
+
+        it("stores runtime_error for failures", async () => {
+            const result = await repl.exec("throw new Error('boom')");
+            expect(result.status).toBe("runtime_error");
+            const check = await repl.exec("console.log(_lastStatus, _lastError.includes('boom'))");
+            expect(check.output).toBe("runtime_error true");
+        });
+    });
+
     describe("auto-print", () => {
         it("auto-prints last expression when no console output", async () => {
             const result = await repl.exec("x = 42");

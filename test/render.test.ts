@@ -36,7 +36,7 @@ describe("formatExecResult", () => {
     it("formats successful result with output", () => {
         const result = {
             content: [{ type: "text" as const, text: "output here" }],
-            details: { code: "x = 1", durationMs: 150, error: false } satisfies SpindleExecDetails,
+            details: { code: "x = 1", durationMs: 150, error: false, status: "ok", truncated: false } satisfies SpindleExecDetails,
         };
         const text = formatExecResult(result, false, theme);
         expect(text).toContain("output here");
@@ -45,7 +45,7 @@ describe("formatExecResult", () => {
     it("formats error result", () => {
         const result = {
             content: [{ type: "text" as const, text: "Error: boom" }],
-            details: { code: "bad()", durationMs: 50, error: true } satisfies SpindleExecDetails,
+            details: { code: "bad()", durationMs: 50, error: true, status: "runtime_error", truncated: false } satisfies SpindleExecDetails,
         };
         const text = formatExecResult(result, false, theme);
         expect(text).toContain("Error: boom");
@@ -54,7 +54,7 @@ describe("formatExecResult", () => {
     it("shows duration for slow results", () => {
         const result = {
             content: [{ type: "text" as const, text: "done" }],
-            details: { code: "x", durationMs: 5000, error: false } satisfies SpindleExecDetails,
+            details: { code: "x", durationMs: 5000, error: false, status: "ok", truncated: false } satisfies SpindleExecDetails,
         };
         const text = formatExecResult(result, false, theme);
         expect(text).toContain("5.0s");
@@ -63,10 +63,19 @@ describe("formatExecResult", () => {
     it("hides duration for fast results", () => {
         const result = {
             content: [{ type: "text" as const, text: "done" }],
-            details: { code: "x", durationMs: 500, error: false } satisfies SpindleExecDetails,
+            details: { code: "x", durationMs: 500, error: false, status: "ok", truncated: false } satisfies SpindleExecDetails,
         };
         const text = formatExecResult(result, false, theme);
         expect(text).not.toContain("0.5s");
+    });
+
+    it("shows truncation hint", () => {
+        const result = {
+            content: [{ type: "text" as const, text: "partial output" }],
+            details: { code: "x", durationMs: 500, error: false, status: "ok", truncated: true } satisfies SpindleExecDetails,
+        };
+        const text = formatExecResult(result, false, theme);
+        expect(text).toContain("_lastValue");
     });
 
     it("handles missing details", () => {
