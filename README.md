@@ -191,7 +191,7 @@ Set `isolation: "worktree"` on agent options for git worktree isolation.
 
 ## Fleet display
 
-When workflows are active, Spindle renders a fleet widget below the editor with compact progress:
+When workflows are active, Spindle renders a fleet widget above the editor with compact progress:
 
 ```text
 ⏣ Spindle 2 runs · 5/12 done · 3 ◎
@@ -204,6 +204,17 @@ When workflows are active, Spindle renders a fleet widget below the editor with 
 ```
 
 For fleets with many agents, phases aggregate automatically — no per-agent listing needed.
+
+### Fleet panel
+
+The `/spindle workflows` command opens an interactive overlay TUI for exploring all workflow runs. Navigate with `↑↓`, drill into phases and agents with `Enter`, go back with `Esc`. Context keys for active runs:
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause/resume run |
+| `x` | Stop run (or stop selected agent) |
+| `r` | Restart selected agent |
+| `a` | Attach to selected agent |
 
 ## Runtime builtins
 
@@ -219,14 +230,16 @@ The persistent REPL (not workflow scripts) provides:
 
 | Command | Description |
 |---------|-------------|
-| `/spindle workflows` | List saved workflows and recent runs |
+| `/spindle workflows` | Open interactive fleet panel (overlay TUI) |
+| `/spindle fleet` | Open fleet panel directly |
 | `/spindle agents` | List workflow agents across runs |
 | `/spindle run <name>` | Run a saved workflow |
 | `/spindle save <name>` | Create a project workflow from template |
 | `/spindle attach <id>` | View agent session details |
-| `/spindle message <id> <text>` | Send message to running agent |
+| `/spindle message <id> <text>` | Send steering message to running agent |
 | `/spindle stop <runId>` | Cancel a running workflow |
 | `/spindle config subModel <model>` | Set default subagent model |
+| `/spindle config driver <mode>` | Set agent driver: `in-memory` or `process` |
 | `/spindle status` | Show runtime state |
 | `/spindle cleanup` | Remove orphaned worktrees and branches |
 | `/spindle mcp` | List MCP servers |
@@ -245,6 +258,16 @@ await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
 await mcp_connect("context7")
 await mcp_disconnect("context7")
 ```
+
+## Agent driver modes
+
+Spindle supports two agent driver modes for executing workflow agents:
+
+- **`in-memory`** (default): Agents run as in-memory `AgentSession` instances within the Pi process. Fast, no process overhead, shared context. Structured output via `structured_output` tool with `terminate: true`.
+
+- **`process`**: Agents spawn as child processes (`pi --mode json -p --no-session`). Full isolation, separate context windows, works with any model. Supports attach/messaging via `pi.sendUserMessage`.
+
+Switch with: `/spindle config driver process`
 
 ## Requirements
 
