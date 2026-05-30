@@ -39,7 +39,10 @@ export class ThreadManager {
         return discoverThreads(this.cwd);
     }
 
-    async run(input: Omit<ThreadExecutionInput, "cwd"> & { cwd?: string }): Promise<ThreadExecutionResult> {
+    async run(
+        input: Omit<ThreadExecutionInput, "cwd"> & { cwd?: string },
+        onRunUpdate?: (run: ThreadRun) => void,
+    ): Promise<ThreadExecutionResult> {
         const cwd = input.cwd ?? this.cwd;
         let script = input.script;
         let scriptPath = input.scriptPath;
@@ -64,6 +67,7 @@ export class ThreadManager {
             onUpdate: (run) => {
                 this.runs.set(run.id, run);
                 this.onUpdate?.(run);
+                onRunUpdate?.(run);
             },
         });
         const result = await runtime.execute();

@@ -21,7 +21,7 @@ import {
     formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
-import { ThreadManager, formatThreadList, formatThreadRun, parseThreadMeta, renderThreadResult, saveThread, summarizeRun, type SpindleThreadDetails, type ThreadAgentOptions } from "./thread/index.js";
+import { ThreadManager, discoverThreads, formatThreadList, formatThreadRun, parseThreadMeta, renderThreadResult, saveThread, summarizeRun, type SpindleThreadDetails, type ThreadAgentOptions } from "./thread/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +91,25 @@ export default function spindle(pi: ExtensionAPI) {
             if (entry.meta.whenToUse) lines.push(`    when: ${entry.meta.whenToUse}`);
         }
         return lines.join("\n");
+    }
+
+    function buildDynamicPromptSummary(workingDir: string): string {
+        const sections: string[] = [];
+        const agentLines = getAgentGuidelineLines();
+        if (agentLines.length > 0) sections.push(agentLines.join("\n"));
+
+        const entries = discoverThreads(workingDir);
+        if (entries.length > 0) {
+            sections.push([
+                "Available Spindle threads (run with spindle({ name, args })):",
+                ...entries.map((entry) => {
+                    const when = entry.meta.whenToUse ? ` — ${entry.meta.whenToUse}` : "";
+                    return `  - ${entry.name}: ${entry.description} (${entry.scope})${when}`;
+                }),
+            ].join("\n"));
+        }
+
+        return sections.filter(Boolean).join("\n\n");
     }
 
     function updateSpindleStatus(): void {
@@ -327,12 +346,12 @@ export default function spindle(pi: ExtensionAPI) {
         }
     });
 
-    pi.on("before_agent_start", async (event, _ctx) => {
-        const summary = mcpGetPromptSummary();
-        if (!summary) return;
+    pi.on("before_agent_start", async (event, ctx) => {
+        const sections = [mcpGetPromptSummary(), buildDynamicPromptSummary(ctx.cwd)].filter(Boolean);
+        if (sections.length === 0) return;
 
         return {
-            systemPrompt: event.systemPrompt + "\n\n" + summary,
+            systemPrompt: event.systemPrompt + "\n\n" + sections.join("\n\n"),
         };
     });
 
@@ -477,6 +496,11 @@ export default function spindle(pi: ExtensionAPI) {
                         scriptPath,
                         args: params.args,
                         cwd: ctx.cwd,
+                    }, (run) => {
+                        onUpdate?.({
+                            content: [{ type: "text", text: `Thread ${run.name}: ${summarizeRun(run)}` }],
+                            details: { kind: "thread", run },
+                        });
                     });
                     const text = [
                         `Thread ${result.run.name}: ${summarizeRun(result.run)}`,
@@ -495,7 +519,12 @@ export default function spindle(pi: ExtensionAPI) {
                     threadAttempt = true;
                     const manager = getThreadManager(ctx.cwd);
                     onUpdate?.({ content: [{ type: "text", text: "Starting scratch thread..." }], details: undefined });
-                    const result = await manager.run({ script: wrapScratchThread(code), args: params.args, cwd: ctx.cwd });
+                    const result = await manager.run({ script: wrapScratchThread(code), args: params.args, cwd: ctx.cwd }, (run) => {
+                        onUpdate?.({
+                            content: [{ type: "text", text: `Thread ${run.name}: ${summarizeRun(run)}` }],
+                            details: { kind: "thread", run },
+                        });
+                    });
                     const text = [
                         `Thread ${result.run.name}: ${summarizeRun(result.run)}`,
                         result.result === undefined ? undefined : typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
