@@ -447,18 +447,13 @@ export default function spindle(pi: ExtensionAPI) {
                         resumeFromRunId: params.resumeFromRunId,
                     }, ctx.cwd);
 
+                    const text = formatWorkflowRun(result.run, ctx.ui.theme, true);
+
                     // Stream progress updates
                     onUpdate?.({
-                        content: [{ type: "text", text: `Workflow ${result.run.name}: ${summarizeWorkflowRun(result.run)}` }],
+                        content: [{ type: "text", text }],
                         details: { kind: "workflow", run: result.run } satisfies SpindleWorkflowDetails,
                     });
-
-                    const text = [
-                        `Workflow ${result.run.name}: ${summarizeWorkflowRun(result.run)}`,
-                        result.result === undefined ? undefined
-                            : typeof result.result === "string" ? result.result
-                            : JSON.stringify(result.result, null, 2),
-                    ].filter(Boolean).join("\n\n");
 
                     return {
                         content: [{ type: "text" as const, text }],
@@ -468,8 +463,11 @@ export default function spindle(pi: ExtensionAPI) {
                     const error = err instanceof Error ? err : new Error(String(err));
                     const failedId = [...workflowRuns.values()].pop()?.id;
                     const failed = failedId ? workflowRuns.get(failedId) : undefined;
+                    const errorText = failed
+                        ? formatWorkflowRun(failed, ctx.ui.theme, true)
+                        : `Workflow failed: ${error.message}`;
                     return {
-                        content: [{ type: "text" as const, text: `Workflow failed: ${error.message}` }],
+                        content: [{ type: "text" as const, text: errorText }],
                         details: failed ? { kind: "workflow" as const, run: failed } satisfies SpindleWorkflowDetails : undefined,
                         isError: true,
                     };
