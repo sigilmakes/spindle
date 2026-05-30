@@ -13,6 +13,9 @@ import {
     formatWorkflowList,
     extractJson,
     validateSchema,
+    createSnapshot,
+    renderFleetWidget,
+    renderStatusLine,
     transformWorkflowScript,
     buildSchemaPrompt,
     type WorkflowAgentCompletion,
@@ -414,5 +417,64 @@ try { await agent("will fail", { retries: 0 }); } catch (e) { return e.message; 
         const { run } = await new WorkflowRuntime({ cwd: process.cwd(), input: {}, script, agentDriver: failDriver }).execute();
         const text = formatWorkflowRun(run, theme, true);
         expect(text).toContain("⚠");
+    });
+});
+// ── Display (fleet widget) ──
+describe("workflow fleet display", () => {
+    const theme = {
+        fg: (_c: string, t: string) => t,
+        bold: (t: string) => t,
+        italic: (t: string) => t,
+        strikethrough: (t: string) => t,
+    };
+
+    it("creates snapshot from workflow run", async () => {
+        const script = `
+export const meta = { name: "snaptest", description: "Snapshot test", phases: [{ title: "Run" }] };
+phase("Run");
+await agent("task a", { label: "a" });
+await agent("task b", { label: "b" });
+return "done";
+`;
+        const { run } = await new WorkflowRuntime({ cwd: process.cwd(), input: {}, script, agentDriver: fakeDriver }).execute();
+        const snapshot = createSnapshot(run);
+        expect(snapshot.name).toBe("snaptest");
+        expect(snapshot.agentCount).toBe(2);
+        expect(snapshot.doneCount).toBe(2);
+        expect(snapshot.runningCount).toBe(0);
+    });
+
+    it("renders fleet widget for active runs", async () => {
+        const script = `
+export const meta = { name: "fleet", description: "Fleet test" };
+const results = await parallel([
+    () => agent("alpha", { label: "alpha", phase: "Fleet" }),
+    () => agent("beta", { label: "beta", phase: "Fleet" }),
+]);
+return results;
+`;
+        const { run } = await new WorkflowRuntime({ cwd: process.cwd(), input: {}, script, agentDriver: fakeDriver }).execute();
+        const snapshot = createSnapshot(run);
+        const lines = renderFleetWidget([snapshot], theme);
+        expect(lines.length).toBeGreaterThan(0);
+        expect(lines[0]).toContain("Spindle");
+        expect(lines.join("\n")).toContain("fleet");
+    });
+
+    it("renders empty fleet gracefully", () => {
+        const lines = renderFleetWidget([], theme);
+        expect(lines[0]).toContain("No active");
+    });
+
+    it("renders fleet status line", async () => {
+        const script = `
+export const meta = { name: "statusline", description: "Status line test" };
+await agent("go", { label: "worker" });
+return "done";
+`;
+        const { run } = await new WorkflowRuntime({ cwd: process.cwd(), input: {}, script, agentDriver: fakeDriver }).execute();
+        const snapshot = createSnapshot(run);
+        const status = renderStatusLine([snapshot], theme);
+        expect(status).toContain("done");
     });
 });

@@ -6,3 +6,4 @@ export * from "./library.js";
 export * from "./render.js";
 export * from "./agent-driver.js";
 export * from "./sessions.js";
+export * from "./display.js";

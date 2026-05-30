@@ -34,6 +34,8 @@ import {
     formatWorkflowList,
     renderWorkflowResult,
     createInMemoryAgentDriver,
+    createSnapshot,
+    renderFleetWidget,
     type SpindleWorkflowDetails,
     type WorkflowRun,
     type WorkflowInput,
@@ -142,9 +144,9 @@ export default function spindle(pi: ExtensionAPI) {
             const agentCount = active.reduce((sum, r) => sum + r.agentOrder.length, 0);
             const agentRunning = active.reduce((sum, r) =>
                 sum + r.agentOrder.filter((id) => r.agents[id]?.status === "running").length, 0);
-            parts.push(theme.fg("warning", `WF: ${active.length} · ${agentRunning}/${agentCount}`));
+            parts.push(theme.fg("warning", `⏣ ${agentRunning}/${agentCount}`));
         } else if (runs.length > 0) {
-            parts.push(theme.fg("dim", `WF: ${runs.length} recent`));
+            parts.push(theme.fg("dim", `⏣ ${runs.length} recent`));
         }
 
         if (repl) {
@@ -155,6 +157,15 @@ export default function spindle(pi: ExtensionAPI) {
         }
 
         widgetUi.setStatus("spindle", parts.join(theme.fg("dim", " · ")));
+
+        // Update fleet widget for active workflows
+        const snapshots = active.map((r) => createSnapshot(r));
+        if (snapshots.length > 0) {
+            const widgetLines = renderFleetWidget(snapshots, theme, { maxRuns: 5, maxAgentsPerRun: 6 });
+            widgetUi.setWidget("spindle-fleet", widgetLines, { placement: "belowEditor" });
+        } else {
+            widgetUi.setWidget("spindle-fleet", undefined);
+        }
     }
 
     function initRepl(workingDir: string): Repl {
