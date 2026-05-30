@@ -176,6 +176,8 @@ export interface WorkflowRuntimeOptions {
     nestedDepth?: number;
     maxNestedDepth?: number;
     onUpdate?: (run: WorkflowRun) => void;
+    onAgentStart?: (event: { id: string; label: string; phase?: string; prompt: string }) => void;
+    onAgentEnd?: (event: { id: string; label: string; phase?: string; result: unknown }) => void;
     resolveWorkflowScript?: (nameOrPath: string) => Promise<{ script: string; scriptPath?: string }>;
 }
 

@@ -35,6 +35,14 @@ import {
     renderWorkflowResult,
     createInMemoryAgentDriver,
     createSnapshot,
+    createSnapshotFromMeta,
+    createStreamingDisplay,
+    pushAgentStart,
+    pushAgentEnd,
+    pushPhase,
+    pushLog,
+    finalizeSnapshot,
+    renderSnapshotText,
     renderFleetWidget,
     type SpindleWorkflowDetails,
     type WorkflowRun,
@@ -162,7 +170,7 @@ export default function spindle(pi: ExtensionAPI) {
         const snapshots = active.map((r) => createSnapshot(r));
         if (snapshots.length > 0) {
             const widgetLines = renderFleetWidget(snapshots, theme, { maxRuns: 5, maxAgentsPerRun: 6 });
-            widgetUi.setWidget("spindle-fleet", widgetLines, { placement: "belowEditor" });
+            widgetUi.setWidget("spindle-fleet", widgetLines, { placement: "aboveEditor" });
         } else {
             widgetUi.setWidget("spindle-fleet", undefined);
         }
@@ -238,7 +246,13 @@ export default function spindle(pi: ExtensionAPI) {
     }
 
     // ── Workflow execution ──
-    async function launchWorkflow(input: WorkflowInput, workingDir: string): Promise<{ run: WorkflowRun; result: unknown }> {
+    async function launchWorkflow(
+        input: WorkflowInput,
+        workingDir: string,
+        streamUpdate?: (text: string, run: WorkflowRun) => void,
+        lifecycle?: { onAgentStart?: (e: { id: string; label: string; phase?: string; prompt: string }) => void; onAgentEnd?: (e: { id: string; label: string; phase?: string; result: unknown }) => void; onPhase?: (title: string) => void; onLog?: (message: string) => void },
+        signal?: AbortSignal,
+    ): Promise<{ run: WorkflowRun; result: unknown }> {
         let script: string | undefined;
         let scriptPath: string | undefined;
 
@@ -260,13 +274,19 @@ export default function spindle(pi: ExtensionAPI) {
             input,
             script,
             scriptPath,
+            signal,
             cache: workflowCache,
             agentDriver: makeAgentDriver(workingDir),
             resolveWorkflowScript: (nameOrPath) => resolveWorkflow(workingDir, nameOrPath),
             onUpdate: (run) => {
                 workflowRuns.set(run.id, run);
                 updateSpindleStatus();
+                if (streamUpdate && widgetUi) {
+                    streamUpdate(formatWorkflowRun(run, widgetUi.theme, false), run);
+                }
             },
+            onAgentStart: lifecycle?.onAgentStart,
+            onAgentEnd: lifecycle?.onAgentEnd,
         });
 
         const result = await runtime.execute();
@@ -438,6 +458,14 @@ export default function spindle(pi: ExtensionAPI) {
                 if (!repl) repl = initRepl(ctx.cwd);
                 currentSignal = signal;
 
+                // Build a lightweight snapshot incrementally like pi-dynamic-workflows
+                let snapshot = createSnapshotFromMeta(params.script, params.name, ctx.cwd);
+                const display = createStreamingDisplay(onUpdate, ctx, snapshot);
+
+                const streamUpdate = (text: string, run: WorkflowRun) => {
+                    display.stream(text, run);
+                };
+
                 try {
                     const result = await launchWorkflow({
                         script: params.script,
@@ -445,18 +473,30 @@ export default function spindle(pi: ExtensionAPI) {
                         scriptPath: params.scriptPath,
                         args: params.args,
                         resumeFromRunId: params.resumeFromRunId,
-                    }, ctx.cwd);
+                    }, ctx.cwd, streamUpdate, {
+                        onAgentStart: (event) => {
+                            snapshot = pushAgentStart(snapshot, event);
+                            display.refresh(snapshot);
+                        },
+                        onAgentEnd: (event) => {
+                            snapshot = pushAgentEnd(snapshot, event);
+                            display.refresh(snapshot);
+                        },
+                        onPhase: (title) => {
+                            snapshot = pushPhase(snapshot, title);
+                            display.refresh(snapshot);
+                        },
+                        onLog: (message) => {
+                            snapshot = pushLog(snapshot, message);
+                            display.refresh(snapshot);
+                        },
+                    }, signal);
 
-                    const text = formatWorkflowRun(result.run, ctx.ui.theme, true);
-
-                    // Stream progress updates
-                    onUpdate?.({
-                        content: [{ type: "text", text }],
-                        details: { kind: "workflow", run: result.run } satisfies SpindleWorkflowDetails,
-                    });
+                    snapshot = finalizeSnapshot(snapshot, result.run);
+                    display.complete(snapshot, result.run);
 
                     return {
-                        content: [{ type: "text" as const, text }],
+                        content: [{ type: "text" as const, text: formatWorkflowRun(result.run, ctx.ui.theme, true) }],
                         details: { kind: "workflow", run: result.run } satisfies SpindleWorkflowDetails,
                     };
                 } catch (err: unknown) {

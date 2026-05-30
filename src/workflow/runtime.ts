@@ -213,6 +213,7 @@ export class WorkflowRuntime {
                         node.status = "running";
                         node.startedAt ??= Date.now();
                         this.emit();
+                        this.opts.onAgentStart?.({ id, label, phase: phaseTitle, prompt });
                         try {
                             const systemPromptSuffix = agentOptions.schema
                                 ? [agentOptions.systemPromptSuffix, buildSchemaPrompt(agentOptions.schema)].filter(Boolean).join("\n\n")
@@ -244,6 +245,7 @@ export class WorkflowRuntime {
                             if (cacheKey) this.cache.set(cacheKey, product);
                             this.run.updatedAt = Date.now();
                             this.emit();
+                            this.opts.onAgentEnd?.({ id, label, phase: phaseTitle, result: product });
                             return product;
                         } catch (err: unknown) {
                             lastError = err instanceof Error ? err : new Error(String(err));
@@ -251,6 +253,7 @@ export class WorkflowRuntime {
                             node.status = attempt < maxAttempts ? "queued" : "failed";
                             this.recordFailure(label, lastError.message);
                             this.emit();
+                            if (attempt >= maxAttempts) this.opts.onAgentEnd?.({ id, label, phase: phaseTitle, result: null });
                             if (this.opts.signal?.aborted) throw err;
                         }
                     }
