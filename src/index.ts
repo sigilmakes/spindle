@@ -3,9 +3,9 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
@@ -21,7 +21,6 @@ import {
     type AgentResult, type SubagentOptions,
 } from "./workers.js";
 import {
-    formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
 import {
@@ -648,7 +647,7 @@ export default function spindle(pi: ExtensionAPI) {
             return new Text(theme.fg("toolTitle", theme.bold("spindle")), 0, 0);
         },
         renderResult(result: any, options: any, theme: any) {
-            return renderWorkflowResultTUI(result as AgentToolResult<SpindleWorkflowDetails>, options.expanded, theme);
+            return renderWorkflowResultTUI(result as AgentToolResult<SpindleWorkflowDetails>, options, theme);
         },
     });
 
@@ -656,7 +655,7 @@ export default function spindle(pi: ExtensionAPI) {
 
     function renderWorkflowResultTUI(
         result: AgentToolResult<SpindleWorkflowDetails>,
-        expanded: boolean,
+        options: { expanded: boolean; isPartial: boolean },
         theme: any,
     ) {
         const details = result.details;
@@ -669,18 +668,22 @@ export default function spindle(pi: ExtensionAPI) {
         const mdTheme = getMarkdownTheme();
         const container = new Container();
 
-        // Header
-        const statusIcon = run.status === "done"
-            ? theme.fg("success", "✓")
-            : run.status === "failed" || run.status === "cancelled"
-                ? theme.fg("error", "✗")
-                : theme.fg("warning", "◎");
+        const { expanded, isPartial } = options;
+
+        // Header — show running/completed status
+        const statusIcon = isPartial
+            ? theme.fg("warning", "◎")
+            : run.status === "done"
+                ? theme.fg("success", "✓")
+                : run.status === "failed" || run.status === "cancelled"
+                    ? theme.fg("error", "✗")
+                    : theme.fg("warning", "◎");
         container.addChild(new Text(
             `${statusIcon} ${theme.fg("toolTitle", theme.bold(run.name))} ${theme.fg("dim", run.id)}`,
             0, 0,
         ));
 
-        // Summary line
+        // Summary line — show running state for partial updates
         const done = run.agentOrder.filter((id) => {
             const s = run.agents[id]?.status;
             return s === "completed" || s === "cached";
@@ -688,10 +691,10 @@ export default function spindle(pi: ExtensionAPI) {
         const total = run.agentOrder.length;
         const cost = run.usage.cost ? ` · $${run.usage.cost.toFixed(4)}` : "";
         const elapsed = ((run.completedAt ?? Date.now()) - run.startedAt) / 1000;
-        container.addChild(new Text(
-            theme.fg("accent", `${run.status} · ${done}/${total}${cost} · ${elapsed.toFixed(1)}s`),
-            1, 0,
-        ));
+        const stateLabel = isPartial
+            ? theme.fg("warning", `running · ${done}/${total}${cost} · ${elapsed.toFixed(1)}s`)
+            : theme.fg("accent", `${run.status} · ${done}/${total}${cost} · ${elapsed.toFixed(1)}s`);
+        container.addChild(new Text(stateLabel, 1, 0));
 
         // Error
         if (run.error) {
