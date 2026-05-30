@@ -2,143 +2,115 @@
 
 ## Tool: `spindle`
 
-One tool covers Spindle's runtime and thread engine.
+One tool covers Spindle's workflow engine.
 
 ```ts
-spindle({ code?: string, name?: string, script?: string, scriptPath?: string, args?: unknown, inspect?: "status" | "threads" })
+spindle({ script?: string, name?: string, scriptPath?: string, args?: unknown, resumeFromRunId?: string })
 ```
 
 Use:
 
-- `{ code }` — run scratch orchestration code. Plain code uses the persistent Node runtime; code using thread DSL helpers runs as a rich thread.
-- `{ name, args }` — run a saved thread from `.pi/threads` or `~/.pi/agent/threads`.
-- `{ script, args }` — run an inline thread script.
-- `{ scriptPath, args }` — run a thread file.
-- `{ inspect: "status" }` — show runtime, usage, and config.
-- `{ inspect: "threads" }` — list saved threads and recent runs.
+- `{ script }` — run an inline workflow script. Must begin with `export const meta = { name, description, phases? }`.
+- `{ name, args }` — run a saved workflow from `.pi/threads` or `~/.pi/agent/threads`.
+- `{ scriptPath, args }` — run a workflow file. Use `@/` prefix for project-relative paths.
+- `{ resumeFromRunId }` — resume from a previous run's checkpoint (same session).
 
-## Thread DSL
+## Workflow DSL
 
-Thread scripts may export metadata:
+Workflow scripts must export literal metadata as the first statement:
 
 ```ts
 export const meta = {
     name: "review",
     description: "Parallel review",
+    whenToUse: "When you need multi-perspective review",
     phases: [{ title: "Scan" }, { title: "Review" }],
 }
 ```
 
-Available inside threads:
+### Determinism
+
+Scripts run inside a VM sandbox. No `Date.now()`, `Math.random()`, `new Date()`, `require`, `import`, `fs`, or network APIs. `meta` must be a pure literal — no spreads, computed keys, function calls, or template interpolation.
+
+### Globals
+
+| Global | Signature | Description |
+|--------|-----------|-------------|
+| `agent` | `(prompt: string, opts?: AgentOptions) => Promise<unknown>` | Spawn a subagent. Returns text or validated object (with `opts.schema`). Returns `null` on failure. |
+| `parallel` | `(thunks: Array<() => Promise<unknown>>) => Promise<unknown[]>` | Run thunks concurrently. Failed thunks return `null`. |
+| `pipeline` | `(items: T[], ...stages: StageFn[]) => Promise<unknown[]>` | Fan-out items through sequential stages. Failed items return `null`. |
+| `phase` | `(title: string) => void` | Mark current phase. |
+| `log` | `(message: string, data?: unknown) => void` | Append log entry. |
+| `args` | `unknown` | Tool's `args` parameter. |
+| `budget` | `{ total, spent(), remaining() }` | Cost tracker. |
+| `workflow` | `(name: string, args?: unknown) => Promise<unknown>` | Run nested workflow (depth ≤ 1). |
+| `cwd` | `string` | Working directory. |
+| `process.cwd()` | `() => string` | Returns `cwd`. |
+
+### AgentOptions
 
 ```ts
-phase(title: string): void
-log(message: string, data?: unknown): void
-agent(prompt: string, opts?: ThreadAgentOptions): Promise<AgentResult | unknown>
-subagent(prompt: string, opts?: ThreadAgentOptions): Promise<AgentResult | unknown>
-parallel<T>(thunks: Array<() => Promise<T> | T>, opts?: { concurrency?: number }): Promise<T[]>
-pipeline<T>(items: T[], ...stages: Array<(prev: unknown, item: T, index: number) => unknown>): Promise<unknown[]>
-thread(nameOrPath: string, args?: unknown): Promise<unknown>
-answer.done(value: unknown): unknown
-args: unknown
-context: unknown
-```
-
-`agent()` options extend `SubagentOptions`:
-
-```ts
-{
-    label?: string;
-    phase?: string;
-    schema?: JsonSchema;
-    retries?: number;
-    cache?: "auto" | "force" | "skip";
-    agent?: string;
-    model?: string;
-    tools?: string[];
-    timeout?: number;
-    worktree?: boolean;
-    name?: string;
-    systemPromptSuffix?: string;
+interface AgentOptions {
+    label?: string                  // Short descriptive label (2-5 words)
+    phase?: string                  // Phase to assign (overrides global)
+    schema?: JsonSchema             // JSON Schema for structured output
+    retries?: number                // Max retry attempts (default: 0)
+    cache?: "auto" | "force" | "skip"  // Caching behavior
+    isolation?: "worktree"           // Git worktree isolation
+    agentType?: string              // Subagent persona from .pi/agents
+    model?: string                  // Model override
+    systemPromptSuffix?: string     // Extra system instructions
 }
 ```
 
-When `schema` is supplied, Spindle asks the child agent for a `<structured>` JSON block and validates it.
+## In-Memory Subagents
 
-## Runtime builtins
+Each `agent()` call creates an in-memory Pi session with full coding tools. The `structured_output` terminate tool is injected when `opts.schema` is set.
 
-Plain orchestration code has a persistent Node-flavored scope:
+## Rendering
 
-- `require`, `process`, `Buffer`, `globalThis`, dynamic `import()`
-- persistent variables across calls
-- top-level `const` / `let` / `var` hoisted into persistent assignments
+Workflow results render with sigils and progress bars:
 
-### Tool wrappers
-
-All return `ToolResult { output, error, ok, exitCode }`. They do not throw.
-
-```ts
-read(args): Promise<ToolResult>
-edit({ path, oldText, newText }): Promise<ToolResult>
-write(args): Promise<ToolResult>
-bash({ command, timeout? }): Promise<ToolResult>
-grep(args): Promise<ToolResult>
-find(args): Promise<ToolResult>
-ls(args): Promise<ToolResult>
+```
+⏣ workflow_name wf_20260530...
+  Description text
+  done · 3/3 · $0.0300 · 12.5s
+  ████████████████ 3/3
 ```
 
-### File I/O
+Phase breakdown and agent detail available in expanded view.
+
+## Library
 
 ```ts
-load(path: string): Promise<string | Map<string, string>>
-save(path: string, content: string): Promise<void>
+discoverWorkflows(cwd: string): WorkflowLibraryEntry[]
+resolveWorkflow(cwd: string, nameOrPath: string): Promise<{ script, scriptPath? }>
+saveWorkflow(cwd: string, name: string, script: string, scope?: "project" | "global"): string
+parseWorkflowMeta(script: string): WorkflowMeta
 ```
 
-### Subagents
+## Fleet Display
 
 ```ts
-subagent(task: string, opts?: SubagentOptions): Promise<AgentResult>
+createSnapshot(run: WorkflowRun): WorkflowSnapshot
+renderFleetWidget(snapshots: WorkflowSnapshot[], theme: Theme, opts?): string[]
+renderStatusLine(snapshots: WorkflowSnapshot[], theme: Theme): string
 ```
 
-Runs a child agent synchronously.
+## Commands
 
-### MCP
-
-```ts
-mcp(server?: string, opts?: { schema?: boolean }): Promise<...>
-mcp_call(server: string, tool: string, args?: object): Promise<ToolResult>
-mcp_connect(server: string): Promise<ServerProxy>
-mcp_disconnect(server?: string): Promise<void>
-```
-
-### Utilities
-
-```ts
-sleep(ms: number): Promise<void>
-diff(a: string, b: string, opts?: { context?: number }): string
-retry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T>
-vars(): string[]
-clear(name?: string): string
-inspectVar(name: string, opts?: { depth?: number; maxChars?: number }): string
-keys(valueOrName: unknown, opts?: { limit?: number }): string[]
-shape(valueOrName: unknown): Record<string, unknown>
-sample(valueOrName: unknown, n?: number): unknown
-preview(valueOrName: unknown, opts?: { maxChars?: number }): string
-help(): string
-```
-
-## Automatic last-result variables
-
-After every plain code call, the runtime updates:
-
-```ts
-_last
-_lastValue
-_lastResult
-_lastOutput
-_lastFullOutput
-_lastError
-_lastDurationMs
-_lastStatus
-_lastTruncated
-```
+| Subcommand | Description |
+|------------|-------------|
+| `workflows` | List saved workflows and recent runs |
+| `agents` | List all workflow agents |
+| `run <name>` | Run a saved workflow |
+| `save <name>` | Create workflow from template |
+| `attach <id>` | View agent details |
+| `message <id> <text>` | Send message to agent |
+| `stop <runId>` | Cancel a running workflow |
+| `config subModel <model>` | Set subagent model |
+| `status` | Show runtime state |
+| `cleanup` | Remove orphaned worktrees/branches |
+| `mcp` | List MCP servers |
+| `mcp reload` | Reload MCP config |
+| `reset` | Reset REPL state |

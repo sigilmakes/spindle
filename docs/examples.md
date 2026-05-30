@@ -1,126 +1,154 @@
-# Examples
+# Workflow Examples
 
-## Explore a codebase
-
-```js
-spindle({ code: `
-r = await subagent("find all authentication-related code and summarize the auth flow")
-console.log(r.summary)
-r.findings.forEach(f => console.log("-", f))
-` })
-```
-
-## Scratch thread: parallel review
-
-```js
-spindle({ code: `
-phase("Review")
-const reviews = await parallel([
-    () => agent("Review src/auth for security issues", { label: "security" }),
-    () => agent("Review src/auth for missing tests", { label: "tests" }),
-    () => agent("Review src/auth for maintainability", { label: "maintainer" }),
-], { concurrency: 3 })
-
-return answer.done(reviews.map(r => ({ status: r.status, summary: r.summary, findings: r.findings })))
-` })
-```
-
-## Saved thread
-
-Create `.pi/threads/review.js`:
+## Parallel review
 
 ```js
 export const meta = {
-    name: "review",
-    description: "Parallel specialist review for a target path",
-    phases: [
-        { title: "Scan", detail: "Understand the target" },
-        { title: "Review", detail: "Shard specialist reviewers" },
-    ],
+  name: 'parallel_review',
+  description: 'Run N independent reviewers in parallel',
+  phases: [
+    { title: 'Review', detail: 'Fan out reviewers' },
+    { title: 'Synthesize', detail: 'Combine findings' },
+  ],
 }
 
-phase("Scan")
-const scout = await agent(`Map the important files and risks in ${args.path}`, { label: "scout" })
-
-phase("Review")
+phase('Review')
 const reviews = await parallel([
-    () => agent(`Security review for ${args.path}`, { label: "security" }),
-    () => agent(`Test-gap review for ${args.path}`, { label: "tests" }),
+  () => agent('Security review for ' + args.path, { label: 'security', phase: 'Review' }),
+  () => agent('Test coverage review for ' + args.path, { label: 'tests', phase: 'Review' }),
+  () => agent('Style and maintainability review for ' + args.path, { label: 'style', phase: 'Review' }),
 ])
 
-return answer.done({ scout, reviews })
+phase('Synthesize')
+const report = await agent(
+  'Combine these reviews into a single structured report:\n' +
+  reviews.filter(Boolean).join('\n---\n'),
+  { label: 'synthesizer', schema: {
+    type: 'object',
+    properties: {
+      verdict: { type: 'string', enum: ['pass', 'warn', 'fail'] },
+      issues: { type: 'array', items: { type: 'string' } },
+      suggestions: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['verdict', 'issues'],
+  } },
+)
+
+return report
 ```
 
-Run it:
+## Pipeline scan
 
 ```js
-spindle({ name: "review", args: { path: "src/" } })
+export const meta = {
+  name: 'codebase_scan',
+  description: 'Scan codebase through collect → classify → summarize stages',
+  phases: [
+    { title: 'Collect' },
+    { title: 'Classify' },
+    { title: 'Summarize' },
+  ],
+}
+
+const results = await pipeline(
+  args.directories || ['src/', 'lib/', 'test/'],
+  (prev, dir) => agent('List key files in ' + dir, { label: 'collect:' + dir, phase: 'Collect' }),
+  (files, dir) => agent('Classify these files by purpose:\n' + files, { label: 'classify:' + dir, phase: 'Classify' }),
+  (classification, dir) => agent('Summarize the classification for ' + dir + ':\n' + classification, { label: 'summarize:' + dir, phase: 'Summarize' }),
+)
+
+return results.filter(Boolean)
 ```
 
 ## Structured extraction
 
 ```js
-spindle({ code: `
-phase("Extract")
-const result = await agent("Extract package metadata from package.json", {
-    label: "extractor",
-    schema: {
-        type: "object",
-        required: ["name", "scripts"],
-        properties: {
-            name: { type: "string" },
-            scripts: { type: "object" },
-        },
-    },
-})
-return answer.done(result)
-` })
-```
-
-## Implement with worktree
-
-```js
-spindle({ code: `
-r = await subagent("add input validation to all API endpoints", { worktree: true })
-if (r.ok) {
-    await bash({ command: `git merge ${r.branch}` })
+export const meta = {
+  name: 'extract_api',
+  description: 'Extract structured API surface from code',
 }
-` })
+
+const api = await agent(
+  'Analyze the public API surface of this codebase. Return endpoints, types, and dependencies.',
+  {
+    label: 'api-extractor',
+    schema: {
+      type: 'object',
+      properties: {
+        endpoints: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              method: { type: 'string' },
+              path: { type: 'string' },
+              description: { type: 'string' },
+            },
+            required: ['method', 'path'],
+          },
+        },
+        types: { type: 'array', items: { type: 'string' } },
+        dependencies: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['endpoints'],
+    },
+  },
+)
+
+return api
 ```
 
-## Pipeline: analyze then fix
+## Phased audit with caching
 
 ```js
-spindle({ code: `
-phase("Analyze")
-analysis = await agent("Identify the top 3 refactoring opportunities in src/", {
-    schema: {
-        type: "object",
-        required: ["items"],
-        properties: { items: { type: "array", items: { type: "string" } } },
-    },
+export const meta = {
+  name: 'security_audit',
+  description: 'Multi-phase security audit with caching',
+  phases: [
+    { title: 'Discovery' },
+    { title: 'Deep scan' },
+    { title: 'Report' },
+  ],
+}
+
+phase('Discovery')
+const surfaces = await agent('Find all security-sensitive code surfaces', { label: 'surfaces' })
+
+phase('Deep scan')
+const deepResults = await parallel([
+  () => agent('Deep scan auth surfaces:\n' + surfaces, { label: 'auth', phase: 'Deep scan', cache: 'auto' }),
+  () => agent('Deep scan input validation surfaces:\n' + surfaces, { label: 'validation', phase: 'Deep scan', cache: 'auto' }),
+  () => agent('Deep scan crypto surfaces:\n' + surfaces, { label: 'crypto', phase: 'Deep scan', cache: 'auto' }),
+])
+
+phase('Report')
+const report = await agent(
+  'Write a security audit report from these findings:\n' +
+  deepResults.filter(Boolean).join('\n===\n'),
+  { label: 'reporter' },
+)
+
+return report
+```
+
+## Retry with resilience
+
+```js
+export const meta = {
+  name: 'resilient_check',
+  description: 'Check with retries for flaky operations',
+}
+
+// Failures return null; retries happen automatically
+const result = await agent('Run the flaky integration test suite and report results', {
+  label: 'flaky-test-runner',
+  retries: 2,
+  phase: 'Check',
 })
 
-phase("Implement")
-results = await parallel(analysis.items.map(item => () =>
-    agent(`Implement safely in an isolated worktree: ${item}`, { worktree: true, label: item.slice(0, 32) })
-))
+if (result === null) {
+  return { ok: false, error: 'All retries exhausted' }
+}
 
-return answer.done(results)
-` })
-```
-
-## Inspect
-
-```js
-spindle({ inspect: "threads" })
-spindle({ inspect: "status" })
-```
-
-Operator commands:
-
-```text
-/spindle threads
-/spindle run review
-/spindle save-thread review
+return result
 ```

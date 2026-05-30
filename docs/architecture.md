@@ -2,95 +2,70 @@
 
 ## Overview
 
-Spindle is a pi extension with one agent-facing tool, `spindle`, plus the `/spindle` operator command. The tool is intentionally simple at the doorway and richer underneath: persistent Node orchestration for quick composition, and **threads** for observable programmatic workflows.
+Spindle is a Pi extension that adds deterministic multi-agent workflow orchestration. One tool surface (`spindle`), in-memory subagent sessions, fleet-scale display.
 
-```text
-pi main session
-├── spindle tool
-│   ├── Persistent Node runtime
-│   │   ├── tool wrappers (read, edit, bash, grep, ...)
-│   │   ├── file I/O (load, save)
-│   │   ├── sync subagent() -> AgentResult
-│   │   ├── MCP builtins
-│   │   └── inspection helpers
-│   └── Thread engine
-│       ├── saved threads (.pi/threads, ~/.pi/agent/threads)
-│       ├── phases, logs, agent nodes, usage
-│       ├── parallel(), pipeline(), nested thread()
-│       ├── structured output validation
-│       └── in-memory result cache
-└── /spindle command (reset, config, cleanup, mcp, threads, run, save-thread)
+```
+user prompt
+  → Pi model writes a workflow script
+  → spindle tool parses + validates via acorn AST
+  → script runs in Node VM sandbox
+  → agent() calls spawn in-memory Pi sessions
+  → progress streams as sigiled text + fleet widget
+  → final result returned to parent assistant
 ```
 
-## Modules
+## Module layout
 
-| Module | Purpose |
-|--------|---------|
-| `index.ts` | Extension entry. Registers the unified tool, commands, status, and builtins. |
-| `repl.ts` | Persistent JavaScript runtime with declaration hoisting, last-result tracking, and Node globals. |
-| `thread/` | Thread metadata, runtime, library discovery, manager, schema validation, and renderers. |
-| `tools.ts` | Tool wrappers (`ToolResult`), load/save, bash. |
-| `builtins.ts` | diff, retry, vars/clear, inspection helpers. |
-| `agents.ts` | Agent discovery from `~/.pi/agent/agents` and `.pi/agents`. |
-| `workers.ts` | `subagent()`, sync RPC child execution, worktree lifecycle. |
-| `episode.ts` | Shared `<episode>` prompt contract and parser for child results. |
-| `mcp.ts` | MCP client built on `@modelcontextprotocol/sdk`. |
-| `mcp-config.ts` | Config loading and merging. |
-| `mcp-cache.ts` | Metadata cache for tool schemas. |
-| `render.ts` | TUI rendering for code/status results. |
-
-## Runtime model
-
-Spindle exposes a Node-flavored scope:
-
-- `require`
-- `process`
-- `Buffer`
-- `globalThis`
-- dynamic `import()`
-
-State persists across plain code calls. Top-level declarations are hoisted into persistent assignments; nested declarations remain block-scoped.
-
-## Thread model
-
-Threads are just JavaScript with a small DSL:
-
-- `phase()` updates the visible phase timeline
-- `log()` records operator-facing breadcrumbs
-- `agent()` / `subagent()` run sync child agents and attach results to the active phase
-- `parallel()` bounds concurrency
-- `pipeline()` makes sharded multi-stage work easy
-- `thread()` composes saved threads
-- `answer.done()` marks the final result
-
-Saved thread metadata enables discovery and operator UI:
-
-```js
-export const meta = {
-    name: "review",
-    description: "Parallel code review",
-    phases: [{ title: "Scan" }, { title: "Review" }],
-}
+```
+src/
+├── index.ts              Extension entry, tool registration, commands
+├── workflow/
+│   ├── types.ts           Type definitions (WorkflowRun, AgentDriver, etc.)
+│   ├── meta.ts            AST-validated meta parser (acorn)
+│   ├── schema.ts          JSON Schema validation + extraction
+│   ├── runtime.ts         WorkflowRuntime: VM sandbox, DSL, scheduler
+│   ├── library.ts         Discover/resolve/save workflows
+│   ├── render.ts          Theme-aware formatting with sigils/progress bars
+│   ├── display.ts         Fleet widget, snapshots, status line
+│   ├── agent-driver.ts    In-memory agent driver (createAgentSession)
+│   └── sessions.ts        Agent session handles (attach/message)
+├── repl.ts                Persistent Node REPL
+├── tools.ts               Tool wrappers (read, edit, write, bash, etc.)
+├── builtins.ts            Diff, retry, context/inspection tools
+├── agents.ts              Subagent persona discovery
+├── workers.ts             Legacy sync subagent (tmux-based)
+├── mcp.ts                 MCP client
+└── mcp-config.ts          MCP config loader
 ```
 
-## Subagent lifecycle
+## Key design decisions
 
-1. `agent()` or `subagent()` is called
-2. Optional worktree is created
-3. A child pi process starts in RPC mode
-4. The task is sent via RPC
-5. Spindle reads the final assistant message and parses the `<episode>` block
-6. The thread node records status, timing, usage, and result
+### VM sandbox, not eval
 
-## Rendering and UI
+Workflow scripts run inside `vm.createContext()` with explicit globals. No `require`, `fs`, `Date.now`, `Math.random`. Deterministic by design.
 
-Spindle follows the current Pi extension/TUI API:
+### AST-validated meta
 
-- `renderCall` and `renderResult` return `Text` components
-- compact default rendering, expanded phase/agent detail on demand
-- `ctx.ui.setStatus()` shows active/recent thread state in the footer
-- slash commands use `ctx.ui.notify()`, `ctx.ui.editor()`, and completions for saved threads
+The `export const meta = { ... }` header is parsed by acorn and evaluated via `evaluateLiteral()` — no `new Function()`, no arbitrary code execution in meta.
 
-## Cache and resume foundations
+### In-memory subagents
 
-The thread manager owns an in-memory cache shared across runs. Agent calls key on prompt/options and can opt out with `cache: "skip"` or refresh with `cache: "force"`. Run details are stored in tool `details`, so Pi sessions have the full rendered state in history. Persistent disk resume is intentionally left as a later layer; the public model does not need to change.
+`agent()` calls create Pi sessions via `createAgentSession` with `SessionManager.inMemory()`. Full coding tools. No tmux, no process spawning. Structured output uses a `terminate: true` tool.
+
+### Null-on-failure
+
+Agents return `null` on failure instead of throwing. This matches the fan-out/fan-in pattern: `parallel()` and `pipeline()` keep running even when some agents fail, returning `null` for failed slots.
+
+### Fleet widget
+
+When workflows are active, a compact fleet widget renders below the editor. For large agent counts, phases aggregate automatically (no per-agent listing until under threshold).
+
+### Storage
+
+No `.spindle/` directories in project repos. Saved workflows go to `.pi/threads/` (project) or `~/.pi/agent/threads/` (global). Runtime state lives in Pi session entries or XDG state (`~/.local/state/spindle/`).
+
+### Sigils
+
+⏣ done · ◎ running · ○ queued · ✦ failed · ⊘ cancelled · ◈ cached
+
+Block progress bars (█/░) with ▓ for errors.
