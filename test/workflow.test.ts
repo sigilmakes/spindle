@@ -117,10 +117,10 @@ describe("workflow meta parser", () => {
         expect(() => parseWorkflowMeta(`export const meta = { name: "nodesc" };`)).toThrow(/description/);
     });
 
-    it("transforms export to plain const for execution", () => {
+    it("strips export const meta from script body", () => {
         const transformed = transformWorkflowScript(`export const meta = { name: "x", description: "y" };\nreturn 1;`);
-        expect(transformed).not.toContain("export");
-        expect(transformed).toContain("const meta =");
+        expect(transformed).not.toContain("export const meta");
+        expect(transformed).toContain("return 1;");
     });
 });
 

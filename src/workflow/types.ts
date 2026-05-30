@@ -1,5 +1,3 @@
-import type { AgentResult, SubagentOptions } from "../workers.js";
-
 export type WorkflowStatus = "queued" | "running" | "paused" | "waiting" | "done" | "failed" | "cancelled";
 export type WorkflowAgentStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "cached";
 
@@ -47,7 +45,7 @@ export type JsonSchema = {
     additionalProperties?: boolean;
 };
 
-export interface WorkflowAgentOptions extends SubagentOptions {
+export interface WorkflowAgentOptions {
     label?: string;
     phase?: string;
     schema?: JsonSchema;
@@ -55,6 +53,12 @@ export interface WorkflowAgentOptions extends SubagentOptions {
     cache?: "auto" | "force" | "skip";
     isolation?: "worktree";
     agentType?: string;
+    agent?: string;
+    model?: string;
+    systemPromptSuffix?: string;
+    worktree?: boolean;
+    workdir?: string;
+    signal?: AbortSignal;
 }
 
 export interface WorkflowAgentRequest {
@@ -75,7 +79,7 @@ export interface WorkflowAgentCompletion {
     text: string;
     ok: boolean;
     value?: unknown;
-    raw?: AgentResult | unknown;
+    raw?: unknown;
     cost: number;
     model: string;
     turns: number;
@@ -99,7 +103,7 @@ export interface WorkflowAgentNode {
     completedAt?: number;
     durationMs?: number;
     cacheKey?: string;
-    result?: WorkflowAgentCompletion | unknown;
+    result?: unknown;
     error?: string;
     schema?: JsonSchema;
     sessionId?: string;
@@ -164,6 +168,7 @@ export interface WorkflowRuntimeOptions {
     script: string;
     scriptPath?: string;
     runId?: string;
+    signal?: AbortSignal;
     agentDriver: WorkflowAgentDriver;
     cache?: Map<string, unknown>;
     maxConcurrency?: number;

@@ -33,6 +33,7 @@ import {
     formatWorkflowRun,
     formatWorkflowList,
     renderWorkflowResult,
+    createInMemoryAgentDriver,
     type SpindleWorkflowDetails,
     type WorkflowRun,
     type WorkflowInput,
@@ -114,37 +115,8 @@ export default function spindle(pi: ExtensionAPI) {
     }
 
     // ── Agent driver adapter: bridges workflow core to existing sync subagent ──
-    function makeSyncAgentDriver(workingDir: string, model?: string): WorkflowAgentDriver {
-        return async (request: WorkflowAgentRequest): Promise<WorkflowAgentCompletion> => {
-            const result = await subagent(request.prompt, {
-                ...request.options,
-                name: request.label,
-                agent: request.options.agent ?? request.options.agentType,
-                worktree: request.options.worktree ?? request.options.isolation === "worktree",
-            }, workingDir, model);
-            cumulativeUsage.totalCost += result.cost;
-            cumulativeUsage.totalSubagents++;
-            updateSpindleStatus();
-            return {
-                status: result.ok ? "success" : "failure",
-                summary: result.summary,
-                findings: result.findings,
-                artifacts: result.artifacts,
-                blockers: result.blockers,
-                text: result.text,
-                ok: result.ok,
-                value: result.ok ? result.text : undefined,
-                raw: result,
-                cost: result.cost,
-                model: result.model,
-                turns: result.turns,
-                toolCalls: result.toolCalls,
-                durationMs: result.durationMs,
-                exitCode: result.exitCode,
-                branch: result.branch,
-                worktree: result.worktree,
-            };
-        };
+    function makeAgentDriver(workingDir: string): WorkflowAgentDriver {
+        return createInMemoryAgentDriver({ cwd: workingDir });
     }
 
     function updateSpindleStatus(): void {
@@ -281,7 +253,7 @@ export default function spindle(pi: ExtensionAPI) {
             script,
             scriptPath,
             cache: workflowCache,
-            agentDriver: makeSyncAgentDriver(workingDir, subModel),
+            agentDriver: makeAgentDriver(workingDir),
             resolveWorkflowScript: (nameOrPath) => resolveWorkflow(workingDir, nameOrPath),
             onUpdate: (run) => {
                 workflowRuns.set(run.id, run);
