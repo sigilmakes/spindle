@@ -45,6 +45,13 @@ export default function spindle(pi: ExtensionAPI) {
     let currentSignal: AbortSignal | undefined;
     let widgetUi: ExtensionUIContext | null = null;
     let threadManager: ThreadManager | null = null;
+    let spindleQueue: Promise<void> = Promise.resolve();
+
+    function enqueueSpindle<T>(fn: () => Promise<T>): Promise<T> {
+        const run = spindleQueue.then(fn, fn);
+        spindleQueue = run.then(() => undefined, () => undefined);
+        return run;
+    }
 
     function getAgentGuidelineLines(): string[] {
         const agents = discoverAgents(cwd);
@@ -436,6 +443,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "Plain { code } also has real Node globals and builtins: read, edit, write, bash, grep, find, ls, load, save, subagent, thread, threads, mcp, mcp_call, mcp_connect, mcp_disconnect, sleep, diff, retry, vars, clear, inspectVar, keys, shape, sample, preview, help.",
                 "If output is truncated, inspect the full value through _lastValue, _lastResult, _lastFullOutput, preview(), shape(), keys(), or sample().",
                 "Use spindle with { inspect: 'threads' } to discover saved threads and recent thread runs; use { inspect: 'status' } for runtime state.",
+                "Spindle serializes its own calls because the runtime is stateful. If a result depends on prior state, keep the request order explicit.",
                 ...getAgentGuidelineLines(),
             ].join("\n"),
         ],
@@ -453,11 +461,12 @@ export default function spindle(pi: ExtensionAPI) {
             return args;
         },
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
-            if (!repl) repl = initRepl(ctx.cwd);
-            currentSignal = signal;
-            let threadAttempt = false;
+            return enqueueSpindle(async () => {
+                if (!repl) repl = initRepl(ctx.cwd);
+                currentSignal = signal;
+                let threadAttempt = false;
 
-            try {
+                try {
                 if (params.inspect === "threads") {
                     const manager = getThreadManager(ctx.cwd);
                     const library = manager.discover();
@@ -570,10 +579,11 @@ export default function spindle(pi: ExtensionAPI) {
                     };
                 }
                 throw err;
-            } finally {
-                currentSignal = undefined;
-                updateSpindleStatus();
-            }
+                } finally {
+                    currentSignal = undefined;
+                    updateSpindleStatus();
+                }
+            });
         },
         renderCall(args, theme) {
             if (args.inspect) {
