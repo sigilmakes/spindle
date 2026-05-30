@@ -5,5 +5,7 @@ export * from "./runtime.js";
 export * from "./library.js";
 export * from "./render.js";
 export * from "./agent-driver.js";
+export * from "./process-driver.js";
 export * from "./sessions.js";
 export * from "./display.js";
+export * from "./fleet-panel.js";

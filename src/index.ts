@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { DynamicBorder, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
 import { createDiff, retry, createContextTools, createInspectionTools } from "./builtins.js";
@@ -32,8 +33,8 @@ import {
     summarizeWorkflowRun,
     formatWorkflowRun,
     formatWorkflowList,
-    renderWorkflowResult,
     createInMemoryAgentDriver,
+    createProcessAgentDriver,
     createSnapshot,
     createSnapshotFromMeta,
     createStreamingDisplay,
@@ -42,8 +43,9 @@ import {
     pushPhase,
     pushLog,
     finalizeSnapshot,
-    renderSnapshotText,
     renderFleetWidget,
+    FleetPanel,
+    type FleetAction,
     type SpindleWorkflowDetails,
     type WorkflowRun,
     type WorkflowInput,
@@ -56,11 +58,6 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 setExtensionDir(__dirname);
-
-function xdgStateDir(): string {
-    const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
-    return path.join(base, "spindle");
-}
 
 export default function spindle(pi: ExtensionAPI) {
     const BUILTIN_NAMES = new Set([
@@ -76,6 +73,7 @@ export default function spindle(pi: ExtensionAPI) {
     let repl: Repl | null = null;
     let cwd = process.cwd();
     let subModel: string | undefined;
+    let agentDriverMode: "in-memory" | "process" = "in-memory";
     const cumulativeUsage = { totalCost: 0, totalSubagents: 0 };
     let currentSignal: AbortSignal | undefined;
     let widgetUi: ExtensionUIContext | null = null;
@@ -84,6 +82,7 @@ export default function spindle(pi: ExtensionAPI) {
     // Workflow engine state
     const workflowRuns = new Map<string, WorkflowRun>();
     const workflowCache = new Map<string, unknown>();
+    const activeRuntimes = new Map<string, WorkflowRuntime>();
 
     function enqueueSpindle<T>(fn: () => Promise<T>): Promise<T> {
         const run = spindleQueue.then(fn, fn);
@@ -124,10 +123,14 @@ export default function spindle(pi: ExtensionAPI) {
         return sections.filter(Boolean).join("\n\n");
     }
 
-    // ── Agent driver adapter: bridges workflow core to existing sync subagent ──
     function makeAgentDriver(workingDir: string): WorkflowAgentDriver {
+        if (agentDriverMode === "process") {
+            return createProcessAgentDriver({ cwd: workingDir });
+        }
         return createInMemoryAgentDriver({ cwd: workingDir });
     }
+
+    // ── Status & widget updates ──
 
     function updateSpindleStatus(): void {
         if (!widgetUi) return;
@@ -166,7 +169,7 @@ export default function spindle(pi: ExtensionAPI) {
 
         widgetUi.setStatus("spindle", parts.join(theme.fg("dim", " · ")));
 
-        // Update fleet widget for active workflows
+        // Fleet widget: at-a-glance status above editor
         const snapshots = active.map((r) => createSnapshot(r));
         if (snapshots.length > 0) {
             const widgetLines = renderFleetWidget(snapshots, theme, { maxRuns: 5, maxAgentsPerRun: 6 });
@@ -246,11 +249,17 @@ export default function spindle(pi: ExtensionAPI) {
     }
 
     // ── Workflow execution ──
+
     async function launchWorkflow(
         input: WorkflowInput,
         workingDir: string,
         streamUpdate?: (text: string, run: WorkflowRun) => void,
-        lifecycle?: { onAgentStart?: (e: { id: string; label: string; phase?: string; prompt: string }) => void; onAgentEnd?: (e: { id: string; label: string; phase?: string; result: unknown }) => void; onPhase?: (title: string) => void; onLog?: (message: string) => void },
+        lifecycle?: {
+            onAgentStart?: (e: { id: string; label: string; phase?: string; prompt: string }) => void;
+            onAgentEnd?: (e: { id: string; label: string; phase?: string; result: unknown }) => void;
+            onPhase?: (title: string) => void;
+            onLog?: (message: string) => void;
+        },
         signal?: AbortSignal,
     ): Promise<{ run: WorkflowRun; result: unknown }> {
         let script: string | undefined;
@@ -289,13 +298,127 @@ export default function spindle(pi: ExtensionAPI) {
             onAgentEnd: lifecycle?.onAgentEnd,
         });
 
-        const result = await runtime.execute();
-        workflowRuns.set(result.run.id, result.run);
-        updateSpindleStatus();
-        return result;
+        activeRuntimes.set(runtime.currentRun?.id ?? "pending", runtime);
+
+        try {
+            const result = await runtime.execute();
+            workflowRuns.set(result.run.id, result.run);
+            updateSpindleStatus();
+            return result;
+        } finally {
+            activeRuntimes.delete(runtime.currentRun?.id ?? "pending");
+        }
+    }
+
+    // ── Fleet action handler ──
+
+    function handleFleetAction(action: FleetAction): void {
+        switch (action.type) {
+            case "pause": {
+                const runtime = activeRuntimes.get(action.runId);
+                if (runtime) {
+                    runtime.cancel();
+                    const run = workflowRuns.get(action.runId);
+                    if (run) {
+                        run.status = "paused";
+                        run.updatedAt = Date.now();
+                    }
+                    widgetUi?.notify(`Paused workflow ${action.runId}`, "info");
+                }
+                break;
+            }
+            case "resume": {
+                const run = workflowRuns.get(action.runId);
+                if (run) {
+                    run.status = "running";
+                    run.updatedAt = Date.now();
+                    widgetUi?.notify(`Resume: re-run spindle({ resumeFromRunId: "${action.runId}" }) to continue`, "info");
+                }
+                break;
+            }
+            case "stop": {
+                const runtime = activeRuntimes.get(action.runId);
+                if (runtime) {
+                    runtime.cancel();
+                }
+                const run = workflowRuns.get(action.runId);
+                if (run) {
+                    run.status = "cancelled";
+                    run.updatedAt = Date.now();
+                }
+                updateSpindleStatus();
+                widgetUi?.notify(`Stopped workflow ${action.runId}`, "info");
+                break;
+            }
+            case "stopAgent": {
+                // Send steer message via Pi API to terminate agent
+                pi.sendUserMessage(
+                    `The agent ${action.agentId} should stop. Finish immediately with what you have.`,
+                    { deliverAs: "steer" },
+                );
+                widgetUi?.notify(`Sent stop signal to agent ${action.agentId}`, "info");
+                break;
+            }
+            case "attach": {
+                // Open a message input for the agent
+                widgetUi?.notify(`Use /spindle message ${action.agentId} <text> to send a message to this agent.`, "info");
+                break;
+            }
+            case "message": {
+                pi.sendUserMessage(action.text, { deliverAs: "steer" });
+                widgetUi?.notify(`Message sent to agent ${action.agentId}`, "info");
+                break;
+            }
+            case "restartAgent": {
+                pi.sendUserMessage(
+                    `Restart your current task from scratch. Discard previous partial results and begin again.`,
+                    { deliverAs: "steer" },
+                );
+                widgetUi?.notify(`Sent restart signal to agent ${action.agentId}`, "info");
+                break;
+            }
+        }
+    }
+
+    // ── Open the interactive fleet panel as overlay ──
+
+    async function openFleetPanel(ctx: { ui: ExtensionUIContext; hasUI?: boolean }): Promise<void> {
+        if (!ctx.hasUI) return;
+
+        const runs = [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt);
+        const theme = ctx.ui.theme;
+
+        const result = await ctx.ui.custom<null>((tui, theme, _kb, done) => {
+            const panel = new FleetPanel(theme, {
+                onAction: (action) => {
+                    handleFleetAction(action);
+                    done(null);
+                },
+                onClose: () => done(null),
+            });
+            panel.updateRuns(runs);
+
+            // Refresh panel data when runs change
+            const refreshInterval = setInterval(() => {
+                const latest = [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt);
+                panel.updateRuns(latest);
+                tui.requestRender();
+            }, 2000);
+
+            return {
+                render: (w) => panel.render(w),
+                invalidate: () => panel.invalidate(),
+                handleInput: (data) => {
+                    panel.handleInput(data);
+                    tui.requestRender();
+                },
+                dispose: () => clearInterval(refreshInterval),
+            };
+        }, { overlay: true });
     }
 
     // ── Pi lifecycle ──
+
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
         widgetUi = ctx.ui;
@@ -310,13 +433,6 @@ export default function spindle(pi: ExtensionAPI) {
                 return { action: ok ? "accept" as const : "decline" as const };
             },
             onSampling: async (params) => {
-                const systemPrompt = params.systemPrompt || "";
-                const lastMessage = Array.isArray(params.messages)
-                    ? params.messages[params.messages.length - 1]
-                    : undefined;
-                const text = typeof lastMessage === "object" && lastMessage !== null
-                    ? JSON.stringify(lastMessage)
-                    : String(lastMessage ?? "");
                 return {
                     model: "spindle-passthrough",
                     role: "assistant" as const,
@@ -345,9 +461,12 @@ export default function spindle(pi: ExtensionAPI) {
         for (let i = entries.length - 1; i >= 0; i--) {
             const entry = entries[i];
             if (entry.type === "custom" && entry.customType === "spindle-config") {
-                const data = entry.data as { subModel?: string } | undefined;
+                const data = entry.data as { subModel?: string; agentDriverMode?: string } | undefined;
                 if (data?.subModel !== undefined && subModel === undefined) {
                     subModel = data.subModel;
+                }
+                if (data?.agentDriverMode === "process" || data?.agentDriverMode === "in-memory") {
+                    agentDriverMode = data.agentDriverMode;
                 }
             }
         }
@@ -367,6 +486,7 @@ export default function spindle(pi: ExtensionAPI) {
     });
 
     // ── Status helpers ──
+
     function buildStatusDetails(): SpindleStatusDetails {
         const variables = repl?.getVariables() ?? [];
         return {
@@ -391,7 +511,7 @@ export default function spindle(pi: ExtensionAPI) {
             varSummary,
             "",
             `Usage: ${details.usage.totalSubagents} subagent calls, $${details.usage.totalCost.toFixed(4)}`,
-            `Config: sub-model=${details.config.subModel || "(default)"}`,
+            `Config: sub-model=${details.config.subModel || "(default)"}, driver=${agentDriverMode}`,
             `Workflows: ${runs.length} recent, ${active.length} active`,
         ].join("\n");
     }
@@ -410,6 +530,7 @@ export default function spindle(pi: ExtensionAPI) {
     }
 
     // ── Tool: spindle ──
+
     pi.registerTool({
         name: "spindle",
         label: "Spindle",
@@ -453,12 +574,11 @@ export default function spindle(pi: ExtensionAPI) {
             if (!args || typeof args !== "object") return args;
             return args;
         },
-        async execute(_toolCallId, params, signal, onUpdate, ctx) {
+        async execute(_toolCallId: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
             return enqueueSpindle(async () => {
                 if (!repl) repl = initRepl(ctx.cwd);
                 currentSignal = signal;
 
-                // Build a lightweight snapshot incrementally like pi-dynamic-workflows
                 let snapshot = createSnapshotFromMeta(params.script, params.name, ctx.cwd);
                 const display = createStreamingDisplay(onUpdate, ctx, snapshot);
 
@@ -517,7 +637,7 @@ export default function spindle(pi: ExtensionAPI) {
                 }
             });
         },
-        renderCall(args, theme) {
+        renderCall(args: any, theme: any) {
             if (args.name) return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", args.name)}`, 0, 0);
             if (args.scriptPath) return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", args.scriptPath)}`, 0, 0);
             if (args.script) {
@@ -527,20 +647,133 @@ export default function spindle(pi: ExtensionAPI) {
             }
             return new Text(theme.fg("toolTitle", theme.bold("spindle")), 0, 0);
         },
-        renderResult(result, options, theme) {
-            return renderWorkflowResult(result as AgentToolResult<SpindleWorkflowDetails>, options.expanded, theme);
+        renderResult(result: any, options: any, theme: any) {
+            return renderWorkflowResultTUI(result as AgentToolResult<SpindleWorkflowDetails>, options.expanded, theme);
         },
     });
 
+    // ── TUI-based renderResult: uses Container/Markdown/Text ──
+
+    function renderWorkflowResultTUI(
+        result: AgentToolResult<SpindleWorkflowDetails>,
+        expanded: boolean,
+        theme: any,
+    ) {
+        const details = result.details;
+        if (!details || details.kind !== "workflow" || !details.run) {
+            const text = result.content?.[0];
+            return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+        }
+
+        const run = details.run;
+        const mdTheme = getMarkdownTheme();
+        const container = new Container();
+
+        // Header
+        const statusIcon = run.status === "done"
+            ? theme.fg("success", "✓")
+            : run.status === "failed" || run.status === "cancelled"
+                ? theme.fg("error", "✗")
+                : theme.fg("warning", "◎");
+        container.addChild(new Text(
+            `${statusIcon} ${theme.fg("toolTitle", theme.bold(run.name))} ${theme.fg("dim", run.id)}`,
+            0, 0,
+        ));
+
+        // Summary line
+        const done = run.agentOrder.filter((id) => {
+            const s = run.agents[id]?.status;
+            return s === "completed" || s === "cached";
+        }).length;
+        const total = run.agentOrder.length;
+        const cost = run.usage.cost ? ` · $${run.usage.cost.toFixed(4)}` : "";
+        const elapsed = ((run.completedAt ?? Date.now()) - run.startedAt) / 1000;
+        container.addChild(new Text(
+            theme.fg("accent", `${run.status} · ${done}/${total}${cost} · ${elapsed.toFixed(1)}s`),
+            1, 0,
+        ));
+
+        // Error
+        if (run.error) {
+            container.addChild(new Spacer(1));
+            container.addChild(new Text(
+                theme.fg("error", `⚠ ${run.error.name}: ${run.error.message}`),
+                1, 0,
+            ));
+        }
+
+        // Failures count
+        if (run.failures.length > 0) {
+            container.addChild(new Text(
+                theme.fg("error", `⚠ ${run.failures.length} failure${run.failures.length === 1 ? "" : "s"}`),
+                1, 0,
+            ));
+            if (expanded) {
+                for (const f of run.failures.slice(0, 8)) {
+                    container.addChild(new Text(
+                        `${theme.fg("dim", f.scope)}: ${theme.fg("error", f.message)}`,
+                        2, 0,
+                    ));
+                }
+            }
+        }
+
+        // Phases
+        if (run.phases.length > 0) {
+            container.addChild(new Spacer(1));
+            for (const phase of run.phases) {
+                const pDone = phase.agents.filter((id: string) => {
+                    const a = run.agents[id];
+                    return a?.status === "completed" || a?.status === "cached";
+                }).length;
+                const pTotal = phase.agents.length;
+                const phaseIcon = phase.status === "done" ? theme.fg("success", "⏣") : phase.status === "failed" ? theme.fg("error", "✦") : theme.fg("warning", "◎");
+                container.addChild(new Text(
+                    `${phaseIcon} ${theme.bold(phase.title)} ${theme.fg("dim", `${pDone}/${pTotal}`)}`,
+                    1, 0,
+                ));
+
+                if (expanded && pTotal > 0) {
+                    for (const agentId of phase.agents) {
+                        const agent = run.agents[agentId];
+                        if (!agent) continue;
+                        const aIcon = agent.status === "completed" || agent.status === "cached"
+                            ? theme.fg("success", "⏣")
+                            : agent.status === "failed"
+                                ? theme.fg("error", "✦")
+                                : theme.fg("warning", "◎");
+                        const dur = agent.durationMs ? ` ${theme.fg("dim", `${(agent.durationMs / 1000).toFixed(1)}s`)}` : "";
+                        const err = agent.error ? ` ${theme.fg("error", "⚠")}` : "";
+                        container.addChild(new Text(
+                            `  ${aIcon} ${agent.label}${dur}${err}`,
+                            2, 0,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Result — only in expanded view
+        if (expanded && run.result !== undefined) {
+            container.addChild(new Spacer(1));
+            container.addChild(new Text(theme.fg("accent", "── result ──"), 1, 0));
+            const rendered = typeof run.result === "string" ? run.result : JSON.stringify(run.result, null, 2);
+            container.addChild(new Markdown(rendered.trim(), 1, 0, mdTheme));
+        }
+
+        return container;
+    }
+
     // ── Slash commands ──
+
     pi.registerCommand("spindle", {
-        description: "Spindle control — workflows, agents, cleanup, config",
+        description: "Spindle control — workflows, fleet panel, agents, cleanup, config",
         getArgumentCompletions: (prefix: string) => {
             const parts = prefix.trimStart().split(/\s+/);
             const first = parts[0] ?? "";
             const subcommands = [
                 "workflows", "agents", "attach", "message", "stop", "pause", "resume",
-                "rerun", "save", "reset", "config", "cleanup", "mcp", "status",
+                "rerun", "save", "reset", "config", "cleanup", "mcp", "status", "fleet",
             ];
             if (parts.length <= 1 && !prefix.endsWith(" ")) {
                 const items = subcommands.filter((cmd) => cmd.startsWith(first)).map((cmd) => ({ value: cmd, label: cmd }));
@@ -548,7 +781,6 @@ export default function spindle(pi: ExtensionAPI) {
             }
             if ((first === "run" || first === "attach" || first === "message" || first === "stop") && parts.length === 2) {
                 const partial = parts[1] ?? "";
-                // Complete workflow names for run, agent IDs for others
                 if (first === "run") {
                     const entries = discoverWorkflows(cwd);
                     const items = entries
@@ -556,7 +788,6 @@ export default function spindle(pi: ExtensionAPI) {
                         .map((e) => ({ value: e.name, label: e.name, description: e.description }));
                     return items.length > 0 ? items : null;
                 }
-                // Agent IDs from active/recent runs
                 const agentIds: string[] = [];
                 for (const run of [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt)) {
                     for (const id of run.agentOrder) {
@@ -567,22 +798,15 @@ export default function spindle(pi: ExtensionAPI) {
             }
             return null;
         },
-        async handler(args, ctx) {
+        async handler(args: string, ctx: any) {
             const parts = args.trim().split(/\s+/);
             const sub = parts[0]?.toLowerCase();
 
             if (sub === "workflows" || sub === "wf") {
-                const runs = [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt);
-                const theme = ctx.ui.theme;
-                const sections = [
-                    formatWorkflowLibrarySummary(),
-                    "",
-                    "Recent runs:",
-                    formatWorkflowList(runs, theme),
-                    "",
-                    "Run: spindle({ name })  Attach: /spindle attach <agentId>",
-                ];
-                ctx.ui.notify(sections.join("\n"), "info");
+                // Open the interactive fleet panel
+                await openFleetPanel(ctx);
+            } else if (sub === "fleet" || sub === "panel") {
+                await openFleetPanel(ctx);
             } else if (sub === "agents") {
                 const runs = [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt);
                 const theme = ctx.ui.theme;
@@ -598,17 +822,14 @@ export default function spindle(pi: ExtensionAPI) {
                 }
                 if (lines.length === 1) lines.push(theme.fg("muted", "  No agents yet."));
                 ctx.ui.notify(lines.join("\n"), "info");
-            } else if (sub === "attach" || sub === "message") {
-                // In v1 with sync subagents, attach is informational only.
-                // Real attach will come with Phase 2 (long-lived agent sessions).
+            } else if (sub === "attach") {
                 const agentId = parts[1];
                 if (!agentId) {
-                    ctx.ui.notify(`Usage: /spindle ${sub} <agentId>`, "warning");
+                    ctx.ui.notify(`Usage: /spindle attach <agentId>`, "warning");
                     return;
                 }
-                // Find agent across runs
                 let found: WorkflowRun | undefined;
-                let agent: import("./workflow/index.js").WorkflowAgentNode | undefined;
+                let agent: any;
                 for (const run of workflowRuns.values()) {
                     const a = run.agents[agentId];
                     if (a) { found = run; agent = a; break; }
@@ -617,30 +838,36 @@ export default function spindle(pi: ExtensionAPI) {
                     ctx.ui.notify(`Agent ${agentId} not found. Use /spindle agents to list.`, "warning");
                     return;
                 }
-                const msg = parts.slice(2).join(" ").trim();
-                if (sub === "attach") {
-                    const theme = ctx.ui.theme;
-                    const info = [
-                        `${theme.fg("toolTitle", theme.bold(agent.label))} (${agentId})`,
-                        `  Status: ${agent.status}`,
-                        `  Run: ${found.name} (${found.id})`,
-                        `  Phase: ${agent.phase ?? "(none)"}`,
-                        `  ${agent.promptPreview}`,
-                    ].join("\n");
-                    ctx.ui.notify(info, "info");
-                    if (agent.status === "running" || agent.status === "waiting") {
-                        ctx.ui.notify("Attach/messaging requires long-lived agent sessions (coming soon). For now, agents complete synchronously.", "info");
-                    }
-                } else if (msg) {
-                    ctx.ui.notify(`Message to ${agent.label}: ${msg}\n(Interactive messaging requires long-lived agent sessions — coming soon.)`, "info");
-                } else {
-                    ctx.ui.notify(`Usage: /spindle message <agentId> <text>`, "warning");
+                const theme = ctx.ui.theme;
+                const info = [
+                    `${theme.fg("toolTitle", theme.bold(agent.label))} (${agentId})`,
+                    `  Status: ${agent.status}`,
+                    `  Run: ${found.name} (${found.id})`,
+                    `  Phase: ${agent.phase ?? "(none)"}`,
+                    `  ${agent.promptPreview}`,
+                ].join("\n");
+                ctx.ui.notify(info, "info");
+                if (agent.status === "running" || agent.status === "waiting") {
+                    // Send a steering message via Pi to interact with the running agent
+                    ctx.ui.notify(`Use /spindle message ${agentId} <text> to inject a message into this agent.`, "info");
                 }
+            } else if (sub === "message") {
+                const agentId = parts[1];
+                const msg = parts.slice(2).join(" ").trim();
+                if (!agentId || !msg) {
+                    ctx.ui.notify(`Usage: /spindle message <agentId> <text>`, "warning");
+                    return;
+                }
+                // Send a steering message to the currently-running agent via Pi
+                pi.sendUserMessage(msg, { deliverAs: "steer" });
+                ctx.ui.notify(`Message sent to agent ${agentId}`, "info");
             } else if (sub === "stop") {
                 const target = parts[1];
                 if (!target) { ctx.ui.notify("Usage: /spindle stop <runId | agentId>", "warning"); return; }
                 const run = workflowRuns.get(target);
                 if (run && (run.status === "running" || run.status === "queued")) {
+                    const runtime = activeRuntimes.get(target);
+                    if (runtime) runtime.cancel();
                     run.status = "cancelled";
                     run.updatedAt = Date.now();
                     updateSpindleStatus();
@@ -698,10 +925,18 @@ export default function spindle(pi: ExtensionAPI) {
                 const value = parts.slice(2).join(" ");
                 if (key === "submodel" || key === "sub-model") {
                     subModel = value || undefined;
-                    pi.appendEntry("spindle-config", { subModel });
+                    pi.appendEntry("spindle-config", { subModel, agentDriverMode });
                     ctx.ui.notify(`Sub-model set to: ${subModel || "(default)"}`, "info");
+                } else if (key === "driver") {
+                    if (value === "process" || value === "in-memory") {
+                        agentDriverMode = value;
+                        pi.appendEntry("spindle-config", { subModel, agentDriverMode });
+                        ctx.ui.notify(`Agent driver set to: ${agentDriverMode}`, "info");
+                    } else {
+                        ctx.ui.notify(`Driver must be "process" or "in-memory". Current: ${agentDriverMode}`, "warning");
+                    }
                 } else {
-                    ctx.ui.notify("Usage: /spindle config subModel <value>", "warning");
+                    ctx.ui.notify("Usage: /spindle config subModel|driver <value>", "warning");
                 }
             } else if (sub === "cleanup") {
                 const result = cleanupWorktrees(ctx.cwd);
@@ -733,14 +968,13 @@ export default function spindle(pi: ExtensionAPI) {
                 const details = buildStatusDetails();
                 ctx.ui.notify(formatStatusText(details), "info");
             } else {
-                const subcommands = "workflows | agents | attach | message | stop | save | run | reset | config | cleanup | mcp | status";
+                const subcommands = "workflows | fleet | agents | attach | message | stop | save | run | reset | config | cleanup | mcp | status";
                 ctx.ui.notify(`Usage: /spindle <${subcommands}>`, "info");
             }
         },
     });
 
-    // Helper for command rendering
-    function colorAgent(status: string, theme: import("@earendil-works/pi-coding-agent").Theme): string {
+    function colorAgent(status: string, theme: any): string {
         const sym = status === "completed" || status === "cached" ? "✓" : status === "failed" || status === "cancelled" ? "✗" : status === "running" ? "●" : "○";
         switch (status) {
             case "completed": case "cached": return theme.fg("success", sym);
@@ -769,6 +1003,7 @@ export { EPISODE_PROMPT, parseEpisodeBlock } from "./episode.js";
 export {
     WorkflowRuntime,
     createInMemoryAgentDriver,
+    createProcessAgentDriver,
     createStructuredOutputTool,
     discoverWorkflows,
     resolveWorkflow,
@@ -777,7 +1012,8 @@ export {
     summarizeWorkflowRun,
     formatWorkflowRun,
     formatWorkflowList,
-    renderWorkflowResult,
+    FleetPanel,
+    type FleetAction,
     type SpindleWorkflowDetails,
     type WorkflowRun,
     type WorkflowInput,
