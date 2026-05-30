@@ -207,10 +207,12 @@ return await agent("prompt", { cache: "force" });
         const failDriver: WorkflowAgentDriver = async () => { throw new Error("boom"); };
         const script = `
 export const meta = { name: "fail", description: "Fail" };
-try { await agent("will fail", { retries: 0 }); } catch (e) { return e.message; }
+const result = await agent("will fail", { retries: 0 });
+if (result === null) return "caught null";
+return result;
 `;
         const { run } = await new WorkflowRuntime({ cwd: process.cwd(), input: {}, script, agentDriver: failDriver }).execute();
-        expect(run.status).toBe("done"); // script caught the error
+        expect(run.status).toBe("done"); // script handled null gracefully
         expect(run.failures.length).toBeGreaterThanOrEqual(1);
         expect(run.agents.a1.status).toBe("failed");
     });
