@@ -24,7 +24,7 @@ Execute: **$ARGUMENTS**
 1. **Read the plan** — load the file, understand the tasks and goals
 2. **Pick a pattern** — match the work to a pattern, or use what the user asked for
 3. **Prepare** — for task-list patterns (ralph, ralph-critic): parse tasks into a structured list. For single-goal patterns (implementer-critic): extract the goal. For research: identify the metric and benchmark command.
-4. **Run the loop** — execute in spindle per the pattern
+4. **Run the loop** — execute via spindle workflow engine per the pattern
 5. **Report** — summarize what was done, what's left
 
 ## Picking a Pattern
@@ -73,13 +73,16 @@ For **implementer-critic**, there's no task list — just a goal string. For **a
 
 ## Running
 
-Read the relevant pattern reference, then run in spindle:
+Read the relevant pattern reference, then build a workflow script:
 
 ```javascript
-spindle({ code: `
-    // ... adapted from pattern reference
-`})
+spindle({ script: `
+export const meta = { name: "ralph", description: "Execute task list", phases: [{ title: "Work" }] };
+// ... adapted from pattern reference
+` })
 ```
+
+Or use the REPL builtins directly for simpler patterns.
 
 ## State & Resumption
 
@@ -121,7 +124,7 @@ Plans come from many sources — `/plan`, kanban boards, PRDs, GitHub issues, pl
 1. **Extract a task list.** Whatever the format, get an array of task descriptions.
 2. **Order the tasks.** Dependencies first. If task B needs task A's output, A goes first.
 3. **Make tasks specific.** "Refactor auth" won't work unsupervised. "Extract JWT validation from auth.ts into jwt.ts" will. Split vague tasks before starting.
-4. **Identify verification.** What command proves a task is done? Tests, type checks, build, lint? Set this up before the loop.
+4. **Identify verification.** What command proves a task is done? Tests, type check, build, lint? Set this up before the loop.
 5. **Choose the pattern.** Task list → ralph or ralph-critic. Single goal → implementer-critic. Metric to optimize → research.
 
 If a plan is too vague to extract specific tasks from, it's not ready for `/work`. Explore the codebase first, then come back with a concrete task list.

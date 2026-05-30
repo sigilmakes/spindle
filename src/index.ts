@@ -185,11 +185,8 @@ export default function spindle(pi: ExtensionAPI) {
                 updateSpindleStatus();
                 return result;
             },
-            thread: async (nameOrScript: string, args?: unknown) => {
-                if (nameOrScript.includes("export const meta")) {
-                    return (await launchWorkflow({ script: nameOrScript, args }, workingDir)).result;
-                }
-                return (await launchWorkflow({ name: nameOrScript, args }, workingDir)).result;
+            thread: async (name: string, args?: unknown) => {
+                return (await launchWorkflow({ name, args }, workingDir)).result;
             },
             threads: () => [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt),
         });
@@ -434,16 +431,6 @@ export default function spindle(pi: ExtensionAPI) {
         ],
         prepareArguments(args): any {
             if (!args || typeof args !== "object") return args;
-            const input = args as { action?: string; [key: string]: unknown };
-            // Accept legacy action fields
-            if (input.action === "run" || input.action === "thread") {
-                const { action, ...rest } = input;
-                return rest;
-            }
-            // Reject old code-only mode — require explicit script format
-            if (input.code && !input.script && !input.name && !input.scriptPath) {
-                return { script: `export const meta = { name: "inline", description: "Inline code" };\n\n${input.code}` };
-            }
             return args;
         },
         async execute(_toolCallId, params, signal, onUpdate, ctx) {

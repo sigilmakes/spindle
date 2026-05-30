@@ -1,53 +1,62 @@
 ---
 name: repl
-description: Spindle orchestration runtime — use the unified spindle tool for persistent Node code, programmatic subagents, MCP calls, and rich multi-agent threads.
+description: Spindle orchestration runtime — use the spindle tool for persistent Node code, programmatic subagents, MCP calls, and multi-agent workflows.
 ---
 
 # Spindle Runtime
 
-Use the `spindle` tool when a task needs composition or state. The simple surface is:
+Use the `spindle` tool when a task needs composition or state. The surface:
 
 ```js
-spindle({ code })                 // scratch orchestration
-spindle({ name, args })           // saved thread
-spindle({ script, args })         // inline thread
-spindle({ scriptPath, args })     // file-backed thread
-spindle({ inspect: "status" })
-spindle({ inspect: "threads" })
+spindle({ script })              // inline workflow script
+spindle({ name, args })           // saved workflow
+spindle({ scriptPath, args })     // file-backed workflow
 ```
 
 Use native tools for one-off reads/writes/commands. Use Spindle when you need JavaScript control flow, subagents, MCP, large-result inspection, or workflow-style phases.
 
-## Thread DSL
+## Workflow DSL
 
-Code that uses `phase()`, `agent()`, `parallel()`, `pipeline()`, or `answer.done()` runs as a rich thread with visible phases and agent nodes.
+Workflow scripts must begin with `export const meta = { name, description, phases? }` and run in a deterministic VM sandbox.
 
 ```js
+export const meta = {
+  name: "review",
+  description: "Parallel review",
+  phases: [{ title: "Explore" }, { title: "Review" }],
+}
+
 phase("Explore")
 const scout = await agent("Find the auth code and summarize it", { label: "scout" })
 
 phase("Review")
 const reviews = await parallel([
-    () => agent("Security review of auth", { label: "security" }),
-    () => agent("Test-gap review of auth", { label: "tests" }),
+  () => agent("Security review of auth", { label: "security", phase: "Review" }),
+  () => agent("Test-gap review of auth", { label: "tests", phase: "Review" }),
 ])
 
-return answer.done({ scout, reviews })
+const synthesis = reviews.filter(Boolean).join("\n---\n")
+return synthesis
 ```
 
-Saved threads live in `.pi/threads/*.js` or `~/.pi/agent/threads/*.js` and export metadata:
+### Globals
 
-```js
-export const meta = {
-    name: "review",
-    description: "Parallel review",
-    phases: [{ title: "Explore" }, { title: "Review" }],
-}
-```
+- `agent(prompt, opts?)` — spawn in-memory subagent. Returns `null` on failure.
+- `parallel(thunks)` — concurrent fan-out. Failed thunks return `null`.
+- `pipeline(items, ...stages)` — fan-out with sequential stages.
+- `phase(title)` — mark current phase.
+- `log(message, data?)` — append log entry.
+- `args` — tool's `args` parameter.
+- `budget` — `{ total, spent(), remaining() }`.
+- `workflow(name, args?)` — run nested saved workflow.
 
-## Node runtime
+### Determinism
 
-Plain code runs in a persistent Node-flavored runtime:
+No `Date.now()`, `Math.random()`, `require`, `import`, `fs` in workflow scripts. `meta` must be a pure literal.
+
+## Node runtime (REPL)
+
+Outside workflows, the persistent REPL provides full Node access:
 
 ```js
 fs = require("node:fs")
@@ -56,15 +65,13 @@ os = await import("node:os")
 console.log(process.version)
 ```
 
-Available globals include `require`, `process`, `Buffer`, `globalThis`, and dynamic `import()`.
-
 ## subagent()
 
 ```js
 r = await subagent(task, opts?)
 ```
 
-Runs a synchronous child agent call and returns `AgentResult` directly.
+Runs a child agent call and returns `AgentResult` directly.
 
 Options: `{ agent, model, tools, timeout, worktree, name, systemPromptSuffix }`.
 
@@ -124,11 +131,16 @@ preview(_lastValue, { maxChars: 800 })
 
 ## Commands
 
-- `/spindle reset`
-- `/spindle cleanup`
-- `/spindle config subModel <model>`
-- `/spindle mcp`
-- `/spindle mcp reload`
-- `/spindle threads`
-- `/spindle run <name>`
-- `/spindle save-thread <name>`
+- `/spindle workflows` — list saved workflows and recent runs
+- `/spindle agents` — list workflow agents
+- `/spindle run <name>` — run a saved workflow
+- `/spindle save <name>` — create workflow from template
+- `/spindle attach <id>` — view agent session details
+- `/spindle message <id> <text>` — send message to running agent
+- `/spindle stop <runId>` — cancel a running workflow
+- `/spindle status` — show runtime state
+- `/spindle cleanup` — remove orphaned worktrees/branches
+- `/spindle config subModel <model>` — set subagent model
+- `/spindle mcp` — list MCP servers
+- `/spindle mcp reload` — reload MCP config
+- `/spindle reset` — reset REPL state
