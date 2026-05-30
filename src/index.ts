@@ -732,6 +732,8 @@ export type { SubagentHandle, AgentResult, SubagentOptions, CleanupResult, Statu
 export { EPISODE_PROMPT, parseEpisodeBlock } from "./episode.js";
 export {
     WorkflowRuntime,
+    createInMemoryAgentDriver,
+    createStructuredOutputTool,
     discoverWorkflows,
     resolveWorkflow,
     saveWorkflow,

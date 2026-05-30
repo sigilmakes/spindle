@@ -1,10 +1,29 @@
 import type { WorkflowMeta } from "./types.js";
 import { parse } from "acorn";
 
-type AnyNode = Node & { [key: string]: any; start: number; end: number };
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Node: new () => AnyNode = require("acorn").Node as any;
+type AnyNode = {
+    [key: string]: unknown;
+    type: string;
+    start: number;
+    end: number;
+    properties?: AnyNode[];
+    elements?: Array<AnyNode | null>;
+    expressions?: AnyNode[];
+    quasis?: AnyNode[];
+    body?: AnyNode[];
+    declaration?: AnyNode;
+    declarations?: AnyNode[];
+    id?: AnyNode;
+    init?: AnyNode;
+    key?: AnyNode;
+    value?: AnyNode;
+    argument?: AnyNode;
+    operator?: string;
+    kind?: string;
+    name?: string;
+    computed?: boolean;
+    method?: boolean;
+};
 
 const DETERMINISM_BLOCKLIST = /\bDate\s*\.\s*now\b|\bMath\s*\.\s*random\b|\bnew\s+Date\s*\(\s*\)/;
 
@@ -39,11 +58,11 @@ export function parseWorkflowScript(script: string): { meta: WorkflowMeta; body:
     if (declaration?.type !== "VariableDeclaration" || declaration.kind !== "const") {
         throw new Error("meta export must be `export const meta = ...`");
     }
-    if (declaration.declarations.length !== 1) {
+    if (!declaration.declarations || declaration.declarations.length !== 1) {
         throw new Error("meta export must declare only `meta`");
     }
 
-    const declarator = declaration.declarations[0] as AnyNode;
+    const declarator = declaration.declarations![0] as AnyNode;
     if (declarator.id?.type !== "Identifier" || declarator.id.name !== "meta") {
         throw new Error("meta export must declare `meta`");
     }
@@ -82,8 +101,8 @@ function evaluateLiteral(node: AnyNode, path: string): unknown {
         case "Literal":
             return node.value;
         case "TemplateLiteral":
-            if (node.expressions.length > 0) throw new Error(`template interpolation not allowed in ${path}`);
-            return node.quasis.map((quasi: AnyNode) => quasi.value.cooked ?? quasi.value.raw).join("");
+            if ((node.expressions as AnyNode[] | undefined)?.length) throw new Error(`template interpolation not allowed in ${path}`);
+            return (node.quasis as AnyNode[]).map((quasi: AnyNode) => (quasi.value as any)?.cooked ?? (quasi.value as any)?.raw).join("");
         case "UnaryExpression":
             if (node.operator === "-" && node.argument?.type === "Literal" && typeof node.argument.value === "number") {
                 return -node.argument.value;
@@ -95,7 +114,7 @@ function evaluateLiteral(node: AnyNode, path: string): unknown {
 }
 
 function propertyKey(node: AnyNode, path: string): string {
-    if (node.type === "Identifier") return node.name;
+    if (node.type === "Identifier") return node.name as string;
     if (node.type === "Literal" && (typeof node.value === "string" || typeof node.value === "number")) {
         return String(node.value);
     }
