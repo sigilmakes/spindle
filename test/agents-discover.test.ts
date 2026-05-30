@@ -6,7 +6,7 @@ import * as path from "node:path";
 // Mock getAgentDir so user-level agents don't interfere with tests.
 // Point it at a nonexistent dir so loadAgentsFromDir returns [].
 const fakeUserDir = path.join(os.tmpdir(), "spindle-test-no-such-dir-" + process.pid);
-vi.mock("@mariozechner/pi-coding-agent", async (importOriginal) => {
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
     const orig = (await importOriginal()) as Record<string, unknown>;
     return { ...orig, getAgentDir: vi.fn(() => fakeUserDir) };
 });

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import {
     createReadTool, createEditTool, createWriteTool,
     createGrepTool, createFindTool, createLsTool,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_MAX_LOAD_SIZE = 10 * 1024 * 1024;
 
@@ -117,7 +117,10 @@ export function createToolWrappers(cwd: string): ToolWrappers {
     for (const [name, tool] of Object.entries(tools)) {
         wrappers[name] = async (args: Record<string, unknown>) => {
             try {
-                const result = await tool.execute(`spindle-${name}-${Date.now()}`, args);
+                const prepared = name === "edit" && typeof args.oldText === "string" && typeof args.newText === "string"
+                    ? { path: args.path, edits: [{ oldText: args.oldText, newText: args.newText }] }
+                    : args;
+                const result = await tool.execute(`spindle-${name}-${Date.now()}`, prepared);
                 return ToolResult.success(extractText(result));
             } catch (err: any) {
                 return ToolResult.fail(err.message || String(err));

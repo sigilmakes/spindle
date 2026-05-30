@@ -226,11 +226,11 @@ export function buildServerPromptSummary(servers: Map<string, ResolvedServer>): 
     if (described.length === 0 && undescribedCount === 0) return null;
 
     const lines: string[] = [
-        "MCP servers (call via spindle_exec):",
+        "MCP servers (call via spindle):",
     ];
     lines.push(...described);
     if (undescribedCount > 0) {
-        lines.push(`  [${undescribedCount} more — use mcp() in spindle_exec to discover]`);
+        lines.push(`  [${undescribedCount} more — use mcp() in spindle to discover]`);
     }
 
     return lines.join("\n");

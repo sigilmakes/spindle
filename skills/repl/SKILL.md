@@ -1,26 +1,53 @@
 ---
 name: repl
-description: Persistent JavaScript runtime for orchestration — proper Node environment, sync subagents, file I/O, tool wrappers, and MCP integration. Use when chaining operations, transforming data, calling MCP tools, or inspecting large results programmatically.
+description: Spindle orchestration runtime — use the unified spindle tool for persistent Node code, programmatic subagents, MCP calls, and rich multi-agent threads.
 ---
 
 # Spindle Runtime
 
-Execute JavaScript in a persistent runtime via `spindle_exec`. State persists across calls.
+Use the `spindle` tool when a task needs composition or state. The simple surface is:
 
-## When to use
+```js
+spindle({ code })                 // scratch orchestration
+spindle({ name, args })           // saved thread
+spindle({ script, args })         // inline thread
+spindle({ scriptPath, args })     // file-backed thread
+spindle({ inspect: "status" })
+spindle({ inspect: "threads" })
+```
 
-- **Chain operations** — grep → filter → map → subagent
-- **Transform data** — load files, parse, aggregate in JS
-- **Persist state** — variables survive across `spindle_exec` calls
-- **Call sync subagents** — `await subagent(...)`
-- **Call MCP servers** — `mcp_call()` / `mcp_connect()`
-- **Inspect large results** — use `_lastValue`, `_lastResult`, `preview()`, `shape()`, `keys()`, `sample()`
+Use native tools for one-off reads/writes/commands. Use Spindle when you need JavaScript control flow, subagents, MCP, large-result inspection, or workflow-style phases.
 
-Use native tools (read, edit, bash) for single operations. Use the runtime when you need composition or state.
+## Thread DSL
 
-## Node environment
+Code that uses `phase()`, `agent()`, `parallel()`, `pipeline()`, or `answer.done()` runs as a rich thread with visible phases and agent nodes.
 
-This is a real Node-flavored runtime, not the old vm sandbox.
+```js
+phase("Explore")
+const scout = await agent("Find the auth code and summarize it", { label: "scout" })
+
+phase("Review")
+const reviews = await parallel([
+    () => agent("Security review of auth", { label: "security" }),
+    () => agent("Test-gap review of auth", { label: "tests" }),
+])
+
+return answer.done({ scout, reviews })
+```
+
+Saved threads live in `.pi/threads/*.js` or `~/.pi/agent/threads/*.js` and export metadata:
+
+```js
+export const meta = {
+    name: "review",
+    description: "Parallel review",
+    phases: [{ title: "Explore" }, { title: "Review" }],
+}
+```
+
+## Node runtime
+
+Plain code runs in a persistent Node-flavored runtime:
 
 ```js
 fs = require("node:fs")
@@ -29,12 +56,7 @@ os = await import("node:os")
 console.log(process.version)
 ```
 
-Available globals include:
-- `require`
-- `process`
-- `Buffer`
-- `globalThis`
-- dynamic `import()`
+Available globals include `require`, `process`, `Buffer`, `globalThis`, and dynamic `import()`.
 
 ## subagent()
 
@@ -42,38 +64,15 @@ Available globals include:
 r = await subagent(task, opts?)
 ```
 
-Runs a **synchronous** child agent call and returns `AgentResult` directly.
+Runs a synchronous child agent call and returns `AgentResult` directly.
 
-```js
-// Explore
-r = await subagent("find all auth code in src/")
-r.findings
-
-// Implement in isolated worktree
-r = await subagent("refactor auth module", { worktree: true })
-await bash({ command: `git merge ${r.branch}` })
-```
-
-**Options:** `{ agent, model, tools, timeout, worktree, name, systemPromptSuffix }`
-
-- `worktree: false` (default) — works in same directory, good for exploration
-- `worktree: true` — gets its own git worktree + branch, good for isolated writes
-
-**AgentResult:**
-```js
-status, summary, findings[], artifacts[], blockers[],
-text, ok, cost, model, turns, toolCalls, durationMs, exitCode,
-branch?, worktree?
-```
+Options: `{ agent, model, tools, timeout, worktree, name, systemPromptSuffix }`.
 
 ## MCP
 
-Configured servers appear in the system prompt. Use `mcp_call()` for one-shot calls, `mcp_connect()` for repeated calls to the same server.
-
 ```js
-await mcp()                    // list all servers
-await mcp("context7")         // list tools (from cache or live)
-
+await mcp()
+await mcp("context7")
 r = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
 
 c7 = await mcp_connect("context7")
@@ -81,11 +80,9 @@ docs = await c7.getLibraryDocs({ context7CompatibleLibraryID: id, topic: "hooks"
 await mcp_disconnect("context7")
 ```
 
-Config: `~/.pi/agent/mcp.json` (global) or `.pi/mcp.json` (project).
-
 ## Tool wrappers
 
-All return `ToolResult { output, error, ok, exitCode }`. Never throw.
+All return `ToolResult { output, error, ok, exitCode }`. They do not throw.
 
 ```js
 r = await grep({ pattern: "TODO", path: "src/" })
@@ -95,16 +92,16 @@ r = await bash({ command: "npm test" })
 ## File I/O
 
 ```js
-content = await load("src/parser.ts")      // string
-files = await load("src/")                 // Map<path, content>
+content = await load("src/parser.ts")
+files = await load("src/")
 await save("output.json", JSON.stringify(data))
 ```
 
 ## Inspection helpers
 
-When output is truncated, inspect the result programmatically. The full value remains in runtime state.
+When output is truncated, the full value remains in runtime state.
 
-Automatic vars after each `spindle_exec` call:
+Automatic vars:
 - `_last`
 - `_lastValue`
 - `_lastResult`
@@ -125,14 +122,13 @@ sample(_lastValue, 5)
 preview(_lastValue, { maxChars: 800 })
 ```
 
-## Scoping
-
-`const`, `let`, `var`, and bare assignments persist across calls.
-
 ## Commands
 
-- `/spindle reset` — reset runtime state
-- `/spindle cleanup` — remove orphaned worktrees, branches, tmux sessions
-- `/spindle config subModel <model>` — default subagent model
-- `/spindle mcp` — list MCP servers
-- `/spindle mcp reload` — reload MCP config
+- `/spindle reset`
+- `/spindle cleanup`
+- `/spindle config subModel <model>`
+- `/spindle mcp`
+- `/spindle mcp reload`
+- `/spindle threads`
+- `/spindle run <name>`
+- `/spindle save-thread <name>`

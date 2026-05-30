@@ -76,7 +76,7 @@ For **implementer-critic**, there's no task list — just a goal string. For **a
 Read the relevant pattern reference, then run in spindle:
 
 ```javascript
-spindle_exec({ code: `
+spindle({ code: `
     // ... adapted from pattern reference
 `})
 ```

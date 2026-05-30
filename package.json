@@ -10,12 +10,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@mariozechner/pi-agent-core": "^0.58.1",
-    "@mariozechner/pi-ai": "^0.58.1",
-    "@mariozechner/pi-coding-agent": "^0.58.1",
-    "@mariozechner/pi-tui": "^0.58.1",
-    "@modelcontextprotocol/sdk": "^1.28.0",
-    "@sinclair/typebox": "^0.34.48"
+    "@earendil-works/pi-agent-core": "^0.78.0",
+    "@earendil-works/pi-ai": "^0.78.0",
+    "@earendil-works/pi-coding-agent": "^0.78.0",
+    "@earendil-works/pi-tui": "^0.78.0",
+    "@modelcontextprotocol/sdk": "^1.28.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

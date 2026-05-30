@@ -1,92 +1,110 @@
 # API Reference
 
-## Tools
+## Tool: `spindle`
 
-### `spindle_exec`
+One tool covers Spindle's runtime and thread engine.
 
-Execute JavaScript in a persistent runtime with a proper Node environment.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `code` | string | JavaScript code to execute |
-
-Notes:
-- `require`, `process`, `Buffer`, `globalThis`, and dynamic `import()` are available
-- runtime variables persist across calls
-- after each call, `_last*` inspection variables are updated
-
-### `spindle_status`
-
-Show runtime variables, usage stats, and configuration. No parameters.
-
-## Runtime Builtins
-
-### Tool wrappers
-
-All return `ToolResult { output, error, ok, exitCode }`. Never throw.
-
-```typescript
-read(args: { path: string; offset?: number; limit?: number }): Promise<ToolResult>
-edit(args: { path: string; oldText: string; newText: string }): Promise<ToolResult>
-write(args: { path: string; content: string }): Promise<ToolResult>
-bash(args: { command: string; timeout?: number }): Promise<ToolResult>
-grep(args: { pattern: string; path: string }): Promise<ToolResult>
-find(args: { pattern: string; path: string }): Promise<ToolResult>
-ls(args: { path: string }): Promise<ToolResult>
+```ts
+spindle({ code?: string, name?: string, script?: string, scriptPath?: string, args?: unknown, inspect?: "status" | "threads" })
 ```
 
-### File I/O
+Use:
 
-```typescript
-load(path: string): Promise<string | Map<string, string>>
-save(path: string, content: string): Promise<void>
+- `{ code }` — run scratch orchestration code. Plain code uses the persistent Node runtime; code using thread DSL helpers runs as a rich thread.
+- `{ name, args }` — run a saved thread from `.pi/threads` or `~/.pi/agent/threads`.
+- `{ script, args }` — run an inline thread script.
+- `{ scriptPath, args }` — run a thread file.
+- `{ inspect: "status" }` — show runtime, usage, and config.
+- `{ inspect: "threads" }` — list saved threads and recent runs.
+
+## Thread DSL
+
+Thread scripts may export metadata:
+
+```ts
+export const meta = {
+    name: "review",
+    description: "Parallel review",
+    phases: [{ title: "Scan" }, { title: "Review" }],
+}
 ```
 
-### `subagent()`
+Available inside threads:
 
-```typescript
-subagent(task: string, opts?: SubagentOptions): Promise<AgentResult>
+```ts
+phase(title: string): void
+log(message: string, data?: unknown): void
+agent(prompt: string, opts?: ThreadAgentOptions): Promise<AgentResult | unknown>
+subagent(prompt: string, opts?: ThreadAgentOptions): Promise<AgentResult | unknown>
+parallel<T>(thunks: Array<() => Promise<T> | T>, opts?: { concurrency?: number }): Promise<T[]>
+pipeline<T>(items: T[], ...stages: Array<(prev: unknown, item: T, index: number) => unknown>): Promise<unknown[]>
+thread(nameOrPath: string, args?: unknown): Promise<unknown>
+answer.done(value: unknown): unknown
+args: unknown
+context: unknown
 ```
 
-Runs a child agent call **synchronously** and returns `AgentResult` directly.
+`agent()` options extend `SubagentOptions`:
 
-**SubagentOptions:**
-```typescript
+```ts
 {
-    name?: string;
+    label?: string;
+    phase?: string;
+    schema?: JsonSchema;
+    retries?: number;
+    cache?: "auto" | "force" | "skip";
     agent?: string;
     model?: string;
     tools?: string[];
     timeout?: number;
     worktree?: boolean;
+    name?: string;
     systemPromptSuffix?: string;
 }
 ```
 
-**AgentResult:**
-```typescript
-{
-    status: "success" | "failure" | "blocked";
-    summary: string;
-    findings: string[];
-    artifacts: string[];
-    blockers: string[];
-    text: string;
-    ok: boolean;
-    cost: number;
-    model: string;
-    turns: number;
-    toolCalls: number;
-    durationMs: number;
-    exitCode: number;
-    branch?: string;
-    worktree?: string;
-}
+When `schema` is supplied, Spindle asks the child agent for a `<structured>` JSON block and validates it.
+
+## Runtime builtins
+
+Plain orchestration code has a persistent Node-flavored scope:
+
+- `require`, `process`, `Buffer`, `globalThis`, dynamic `import()`
+- persistent variables across calls
+- top-level `const` / `let` / `var` hoisted into persistent assignments
+
+### Tool wrappers
+
+All return `ToolResult { output, error, ok, exitCode }`. They do not throw.
+
+```ts
+read(args): Promise<ToolResult>
+edit({ path, oldText, newText }): Promise<ToolResult>
+write(args): Promise<ToolResult>
+bash({ command, timeout? }): Promise<ToolResult>
+grep(args): Promise<ToolResult>
+find(args): Promise<ToolResult>
+ls(args): Promise<ToolResult>
 ```
+
+### File I/O
+
+```ts
+load(path: string): Promise<string | Map<string, string>>
+save(path: string, content: string): Promise<void>
+```
+
+### Subagents
+
+```ts
+subagent(task: string, opts?: SubagentOptions): Promise<AgentResult>
+```
+
+Runs a child agent synchronously.
 
 ### MCP
 
-```typescript
+```ts
 mcp(server?: string, opts?: { schema?: boolean }): Promise<...>
 mcp_call(server: string, tool: string, args?: object): Promise<ToolResult>
 mcp_connect(server: string): Promise<ServerProxy>
@@ -95,7 +113,7 @@ mcp_disconnect(server?: string): Promise<void>
 
 ### Utilities
 
-```typescript
+```ts
 sleep(ms: number): Promise<void>
 diff(a: string, b: string, opts?: { context?: number }): string
 retry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T>
@@ -111,9 +129,9 @@ help(): string
 
 ## Automatic last-result variables
 
-After every `spindle_exec` call, the runtime updates:
+After every plain code call, the runtime updates:
 
-```typescript
+```ts
 _last
 _lastValue
 _lastResult
@@ -124,19 +142,3 @@ _lastDurationMs
 _lastStatus
 _lastTruncated
 ```
-
-These are especially useful when output is truncated.
-
-## Runtime result status
-
-`Repl.exec()` normalizes outcomes with a status field:
-
-```typescript
-type ExecStatus =
-    | "ok"
-    | "aborted_by_user"
-    | "runtime_error"
-    | "process_terminated";
-```
-
-This status is exposed in `spindle_exec` details and mirrored into `_lastStatus`.

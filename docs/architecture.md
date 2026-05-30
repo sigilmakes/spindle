@@ -2,41 +2,46 @@
 
 ## Overview
 
-Spindle is a pi extension with two tools (`spindle_exec`, `spindle_status`) and a slash command. The center of the system is a **persistent JavaScript runtime with a proper Node environment**.
+Spindle is a pi extension with one agent-facing tool, `spindle`, plus the `/spindle` operator command. The tool is intentionally simple at the doorway and richer underneath: persistent Node orchestration for quick composition, and **threads** for observable programmatic workflows.
 
 ```text
-pi (main session)
-├── spindle_exec tool
-│   └── Repl (persistent runtime)
-│       ├── real Node globals (require, process, Buffer, globalThis)
-│       ├── tool wrappers (read, edit, bash, grep, ...)
-│       ├── file I/O (load, save)
-│       ├── sync subagent() -> AgentResult
-│       ├── MCP builtins
-│       └── utilities (diff, retry, vars, clear, inspect helpers)
-├── spindle_status tool
-└── /spindle command (reset, config, cleanup, mcp)
+pi main session
+├── spindle tool
+│   ├── Persistent Node runtime
+│   │   ├── tool wrappers (read, edit, bash, grep, ...)
+│   │   ├── file I/O (load, save)
+│   │   ├── sync subagent() -> AgentResult
+│   │   ├── MCP builtins
+│   │   └── inspection helpers
+│   └── Thread engine
+│       ├── saved threads (.pi/threads, ~/.pi/agent/threads)
+│       ├── phases, logs, agent nodes, usage
+│       ├── parallel(), pipeline(), nested thread()
+│       ├── structured output validation
+│       └── in-memory result cache
+└── /spindle command (reset, config, cleanup, mcp, threads, run, save-thread)
 ```
 
 ## Modules
 
 | Module | Purpose |
 |--------|---------|
-| `index.ts` | Extension entry. Registers tools, commands, wires builtins. |
-| `repl.ts` | Persistent JavaScript runtime with declaration hoisting, last-result tracking, and proper Node globals. |
-| `tools.ts` | Tool wrappers (ToolResult), load/save, bash. |
+| `index.ts` | Extension entry. Registers the unified tool, commands, status, and builtins. |
+| `repl.ts` | Persistent JavaScript runtime with declaration hoisting, last-result tracking, and Node globals. |
+| `thread/` | Thread metadata, runtime, library discovery, manager, schema validation, and renderers. |
+| `tools.ts` | Tool wrappers (`ToolResult`), load/save, bash. |
 | `builtins.ts` | diff, retry, vars/clear, inspection helpers. |
-| `agents.ts` | Agent discovery from ~/.pi/agent/agents and .pi/agents. |
-| `workers.ts` | `subagent()`, `AgentResult`, sync RPC child execution, worktree lifecycle. |
+| `agents.ts` | Agent discovery from `~/.pi/agent/agents` and `.pi/agents`. |
+| `workers.ts` | `subagent()`, sync RPC child execution, worktree lifecycle. |
 | `episode.ts` | Shared `<episode>` prompt contract and parser for child results. |
-| `mcp.ts` | MCP client built on `@modelcontextprotocol/sdk`. Full protocol support. |
-| `mcp-config.ts` | Config loading and merging (project > global > editor imports). |
-| `mcp-cache.ts` | Metadata cache for tool schemas (discovery without live connections). |
-| `render.ts` | TUI rendering for `spindle_exec` and `spindle_status`. |
+| `mcp.ts` | MCP client built on `@modelcontextprotocol/sdk`. |
+| `mcp-config.ts` | Config loading and merging. |
+| `mcp-cache.ts` | Metadata cache for tool schemas. |
+| `render.ts` | TUI rendering for code/status results. |
 
 ## Runtime model
 
-Spindle is no longer centered on a `vm` sandbox. The runtime exposes a Node-flavored scope:
+Spindle exposes a Node-flavored scope:
 
 - `require`
 - `process`
@@ -44,61 +49,48 @@ Spindle is no longer centered on a `vm` sandbox. The runtime exposes a Node-flav
 - `globalThis`
 - dynamic `import()`
 
-State persists across `spindle_exec` calls. Top-level `const` / `let` / `var` declarations are hoisted into persistent assignments, while nested declarations remain block-scoped.
+State persists across plain code calls. Top-level declarations are hoisted into persistent assignments; nested declarations remain block-scoped.
+
+## Thread model
+
+Threads are just JavaScript with a small DSL:
+
+- `phase()` updates the visible phase timeline
+- `log()` records operator-facing breadcrumbs
+- `agent()` / `subagent()` run sync child agents and attach results to the active phase
+- `parallel()` bounds concurrency
+- `pipeline()` makes sharded multi-stage work easy
+- `thread()` composes saved threads
+- `answer.done()` marks the final result
+
+Saved thread metadata enables discovery and operator UI:
+
+```js
+export const meta = {
+    name: "review",
+    description: "Parallel code review",
+    phases: [{ title: "Scan" }, { title: "Review" }],
+}
+```
 
 ## Subagent lifecycle
 
-1. `await subagent("task", opts)` is called in the runtime
-2. If `worktree: true`, create a git worktree and branch under `.worktrees/`
-3. Start a child pi process in **RPC mode**:
-   - `pi --mode rpc --no-session ...`
-4. Optionally append a system prompt that includes the `<episode>` result contract
-5. Send the task via RPC `prompt`
-6. Stream RPC events until `agent_end`
-7. Extract the last assistant message, parse the `<episode>` block, and build `AgentResult`
-8. Return `AgentResult` directly to the caller
+1. `agent()` or `subagent()` is called
+2. Optional worktree is created
+3. A child pi process starts in RPC mode
+4. The task is sent via RPC
+5. Spindle reads the final assistant message and parses the `<episode>` block
+6. The thread node records status, timing, usage, and result
 
-The main process does **not** rely on a poller or `.spindle/status.json` as the primary truth path anymore.
+## Rendering and UI
 
-## Last-result tracking
+Spindle follows the current Pi extension/TUI API:
 
-After each `spindle_exec` call, the runtime updates:
+- `renderCall` and `renderResult` return `Text` components
+- compact default rendering, expanded phase/agent detail on demand
+- `ctx.ui.setStatus()` shows active/recent thread state in the footer
+- slash commands use `ctx.ui.notify()`, `ctx.ui.editor()`, and completions for saved threads
 
-- `_last`
-- `_lastValue`
-- `_lastResult`
-- `_lastOutput`
-- `_lastFullOutput`
-- `_lastError`
-- `_lastDurationMs`
-- `_lastStatus`
-- `_lastTruncated`
+## Cache and resume foundations
 
-This makes truncation survivable: large values remain in runtime state even when printed output is clipped.
-
-## Inspection helpers
-
-`builtins.ts` exposes lightweight inspection helpers to reduce repeated ad-hoc debugging code:
-
-- `inspectVar(name)`
-- `keys(valueOrName)`
-- `shape(valueOrName)`
-- `sample(valueOrName, n?)`
-- `preview(valueOrName, opts?)`
-
-These work on either raw values or variable names already stored in runtime state.
-
-## Error semantics
-
-`repl.ts` normalizes execution outcomes into explicit statuses:
-
-- `ok`
-- `aborted_by_user`
-- `runtime_error`
-- `process_terminated`
-
-These statuses are stored in `_lastStatus` and surfaced in `spindle_exec` details.
-
-## tmux
-
-tmux is no longer the primary coordination backbone. It may still be useful for auxiliary observability or cleanup, but sync child execution now uses RPC as the source of truth.
+The thread manager owns an in-memory cache shared across runs. Agent calls key on prompt/options and can opt out with `cache: "skip"` or refresh with `cache: "force"`. Run details are stored in tool `details`, so Pi sessions have the full rendered state in history. Persistent disk resume is intentionally left as a later layer; the public model does not need to change.

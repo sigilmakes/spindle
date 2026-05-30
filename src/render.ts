@@ -1,5 +1,5 @@
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import { highlightCode, type Theme } from "@mariozechner/pi-coding-agent";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { highlightCode, type Theme } from "@earendil-works/pi-coding-agent";
 
 export interface SpindleExecDetails {
     code: string;
@@ -23,7 +23,7 @@ export function formatCodeForDisplay(code: string, theme: Theme): string {
         highlighted = code.split("\n");
     }
 
-    let text = theme.fg("toolTitle", theme.bold("spindle_exec")) + "\n";
+    let text = theme.fg("toolTitle", theme.bold("spindle")) + "\n";
     for (const line of highlighted) {
         text += "  " + line + "\n";
     }

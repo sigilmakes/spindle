@@ -1,8 +1,8 @@
 # Advanced Usage
 
-## REPL internals
+## Runtime internals
 
-The REPL runs code in a Node.js `vm.Context`. Top-level `const`/`let`/`var` declarations are hoisted to bare assignments so they persist across `spindle_exec` calls.
+Plain `spindle({ code })` runs in a persistent Node-flavored scope, not a browser sandbox. Top-level `const`/`let`/`var` declarations are hoisted to bare assignments so they persist across calls.
 
 ```js
 // Call 1
@@ -10,10 +10,10 @@ const x = 42
 // Internally transformed to: x = 42
 
 // Call 2
-x  // → 42  (persists on the vm context)
+x  // → 42
 ```
 
-File execution (`spindle_exec({ file: "path.js" })`) skips hoisting — declarations keep their normal scoping.
+Scratch code that uses thread DSL helpers (`phase`, `agent`, `parallel`, `pipeline`, `answer.done`) runs through the thread engine instead, so it gets phase/agent rendering and cache behavior.
 
 ## ToolResult
 

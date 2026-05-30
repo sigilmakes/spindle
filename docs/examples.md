@@ -3,101 +3,124 @@
 ## Explore a codebase
 
 ```js
-r = await subagent("find all authentication-related code and summarize the auth flow").result
+spindle({ code: `
+r = await subagent("find all authentication-related code and summarize the auth flow")
 console.log(r.summary)
 r.findings.forEach(f => console.log("-", f))
+` })
 ```
 
-## Parallel review
+## Scratch thread: parallel review
 
 ```js
-files = [...(await load('src/')).keys()].filter(f => f.endsWith('.ts'))
-workers = files.map(f => subagent(`Review ${f} for security issues`))
-results = await Promise.all(workers.map(w => w.result))
+spindle({ code: `
+phase("Review")
+const reviews = await parallel([
+    () => agent("Review src/auth for security issues", { label: "security" }),
+    () => agent("Review src/auth for missing tests", { label: "tests" }),
+    () => agent("Review src/auth for maintainability", { label: "maintainer" }),
+], { concurrency: 3 })
 
-// Report
-for (let i = 0; i < workers.length; i++) {
-    console.log(`${workers[i].id}: ${results[i].status}`)
-    results[i].findings.forEach(f => console.log("  -", f))
+return answer.done(reviews.map(r => ({ status: r.status, summary: r.summary, findings: r.findings })))
+` })
+```
+
+## Saved thread
+
+Create `.pi/threads/review.js`:
+
+```js
+export const meta = {
+    name: "review",
+    description: "Parallel specialist review for a target path",
+    phases: [
+        { title: "Scan", detail: "Understand the target" },
+        { title: "Review", detail: "Shard specialist reviewers" },
+    ],
 }
+
+phase("Scan")
+const scout = await agent(`Map the important files and risks in ${args.path}`, { label: "scout" })
+
+phase("Review")
+const reviews = await parallel([
+    () => agent(`Security review for ${args.path}`, { label: "security" }),
+    () => agent(`Test-gap review for ${args.path}`, { label: "tests" }),
+])
+
+return answer.done({ scout, reviews })
+```
+
+Run it:
+
+```js
+spindle({ name: "review", args: { path: "src/" } })
+```
+
+## Structured extraction
+
+```js
+spindle({ code: `
+phase("Extract")
+const result = await agent("Extract package metadata from package.json", {
+    label: "extractor",
+    schema: {
+        type: "object",
+        required: ["name", "scripts"],
+        properties: {
+            name: { type: "string" },
+            scripts: { type: "object" },
+        },
+    },
+})
+return answer.done(result)
+` })
 ```
 
 ## Implement with worktree
 
 ```js
-h = subagent("add input validation to all API endpoints", { worktree: true })
-// agent keeps working on other things...
-r = await h.result
+spindle({ code: `
+r = await subagent("add input validation to all API endpoints", { worktree: true })
 if (r.ok) {
     await bash({ command: `git merge ${r.branch}` })
 }
-```
-
-## Fire and forget
-
-```js
-subagent("refactor auth to use JWT", { worktree: true })
-subagent("add comprehensive parser tests", { worktree: true })
-subagent("update deprecated API calls", { worktree: true })
-// notifications arrive as each finishes
-```
-
-## Collect selectively
-
-```js
-workers = [
-    subagent("fast: lint fixes", { worktree: true }),
-    subagent("slow: full refactor", { worktree: true }),
-    subagent("medium: docs update", { worktree: true }),
-]
-
-// Collect the fast one first
-r0 = await workers[0].result
-
-// Check others
-done = workers.filter(w => w.status === "done")
-running = workers.filter(w => w.status === "running")
+` })
 ```
 
 ## Pipeline: analyze then fix
 
 ```js
-// Explore (no worktree — read-only)
-analysis = await subagent("identify the top 3 refactoring opportunities in src/").result
+spindle({ code: `
+phase("Analyze")
+analysis = await agent("Identify the top 3 refactoring opportunities in src/", {
+    schema: {
+        type: "object",
+        required: ["items"],
+        properties: { items: { type: "array", items: { type: "string" } } },
+    },
+})
 
-// Implement each (worktree — isolated writes)
-workers = analysis.findings.map(f => subagent(f, { worktree: true }))
-results = await Promise.all(workers.map(w => w.result))
+phase("Implement")
+results = await parallel(analysis.items.map(item => () =>
+    agent(`Implement safely in an isolated worktree: ${item}`, { worktree: true, label: item.slice(0, 32) })
+))
 
-// Merge successful ones
-for (let i = 0; i < workers.length; i++) {
-    if (results[i].ok) {
-        await bash({ command: `git merge ${workers[i].branch}` })
-    }
-}
+return answer.done(results)
+` })
 ```
 
-## Using pre-defined agents
+## Inspect
 
 ```js
-// Agent defined in ~/.pi/agent/agents/scout.md
-r = await subagent("find all uses of deprecated APIs", { agent: "scout" }).result
-r.findings.forEach(f => console.log(f))
+spindle({ inspect: "threads" })
+spindle({ inspect: "status" })
 ```
 
-## Cancel a stuck subagent
+Operator commands:
 
-```js
-h = subagent("some task that might hang")
-await sleep(60000)
-if (h.status === "running") {
-    await h.cancel()
-}
-```
-
-## Attach to watch
-
-```
-/spindle list        — see all subagents
-/spindle attach w0   — jump to w0's tmux session
+```text
+/spindle threads
+/spindle run review
+/spindle save-thread review
 ```

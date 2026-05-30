@@ -1,6 +1,6 @@
 # Spindle
 
-Persistent JavaScript runtime for [pi](https://github.com/badlogic/pi-mono), with a **proper Node environment**, **sync subagents**, full MCP support, and optional git worktree isolation.
+Persistent JavaScript orchestration for [pi](https://github.com/earendil-works/pi-coding-agent), with **threads**: simple programmatic workflows for sync subagents, phases, parallelism, caching, structured outputs, MCP, and rich TUI status.
 
 ## Install
 
@@ -8,138 +8,125 @@ Persistent JavaScript runtime for [pi](https://github.com/badlogic/pi-mono), wit
 pi install git:github.com/sigilmakes/spindle
 ```
 
-## What changed
+## The shape
 
-Spindle is no longer centered on async tmux subagents and a fake `vm` REPL.
+Spindle exposes one agent-facing tool: `spindle`.
 
-The current direction is:
-- a persistent JS runtime with real Node globals
-- `require`, `process`, `Buffer`, and dynamic `import()` work
-- subagents are **synchronous by default**
-- child execution uses **RPC**, not a poller and status-file loop
-- tmux is no longer the primary execution path
+```js
+// Scratch thread / orchestration code
+spindle({ code: `
+phase("Explore")
+const scout = await agent("Find auth code and summarize the flow", { label: "scout" })
+return answer.done(scout.summary)
+` })
+
+// Saved thread
+spindle({ name: "review", args: { area: "src/auth" } })
+
+// Inspect
+spindle({ inspect: "threads" })
+spindle({ inspect: "status" })
+```
+
+Plain code still runs in the persistent Node runtime. Code using `phase()`, `agent()`, `parallel()`, `pipeline()`, `answer.done()`, or a `meta` export runs as a rich thread with observable phases and agent nodes.
 
 ## Quick start
 
 ```js
 // Real Node runtime
-fs = require('node:fs')
-path = await import('node:path')
+fs = require("node:fs")
+path = await import("node:path")
 console.log(process.version)
 
 // Sync subagent
 r = await subagent("find all auth-related code in src/")
 r.findings
 
-// Isolated implementation call
-r = await subagent("refactor auth to use JWT", { worktree: true })
-await bash({ command: `git merge ${r.branch}` })
+// Thread DSL
+phase("Review")
+results = await parallel([
+    () => agent("Review auth for security issues", { label: "security" }),
+    () => agent("Review auth for maintainability", { label: "maintainer" }),
+])
+return answer.done(results.map(r => r.summary))
 
 // MCP
 r = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
 ```
 
-## Architecture
+## Saved threads
 
-```text
-Main pi session
-├── spindle_exec
-│   └── Persistent JS runtime (Node environment)
-│       ├── tool wrappers (read, bash, grep, ...)
-│       ├── file I/O helpers (load, save)
-│       ├── sync subagent(task, opts) -> AgentResult
-│       └── MCP builtins
-├── spindle_status
-└── /spindle command (reset, config, cleanup, mcp)
+Project threads live in `.pi/threads/*.js`; global threads live in `~/.pi/agent/threads/*.js`.
 
-Sync subagent call
-└── pi --mode rpc --no-session [...]
-    └── child session returns a structured <episode> block
+```js
+export const meta = {
+    name: "review",
+    description: "Run a parallel code review",
+    phases: [
+        { title: "Scan", detail: "Map the target area" },
+        { title: "Review", detail: "Shard specialist reviewers" },
+    ],
+}
+
+phase("Scan")
+const files = await agent(`List the important files for ${args.area}`, { label: "scout" })
+
+phase("Review")
+const reviews = await parallel([
+    () => agent(`Security review for ${args.area}`, { label: "security" }),
+    () => agent(`Test-gap review for ${args.area}`, { label: "tests" }),
+])
+
+return answer.done({ files, reviews })
 ```
 
-## REPL / runtime
+Run with:
 
-Spindle's persistent runtime supports:
-- `require('node:fs')`
-- `await import('node:path')`
-- `process`, `Buffer`, `globalThis`
-- persistent variables across calls
+```js
+spindle({ name: "review", args: { area: "src/" } })
+```
 
-The runtime still provides built-in tool wrappers and helpers:
-- `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`
-- `load`, `save`
-- `subagent`
-- `mcp`, `mcp_call`, `mcp_connect`, `mcp_disconnect`
-- `sleep`, `diff`, `retry`, `vars`, `clear`
-- `inspectVar`, `keys`, `shape`, `sample`, `preview`, `help`
+or from the operator console:
+
+```text
+/spindle threads
+/spindle run review
+/spindle save-thread review
+```
+
+## Runtime builtins
+
+- Tool wrappers: `read`, `edit`, `write`, `bash`, `grep`, `find`, `ls`
+- File I/O: `load`, `save`
+- Agents: `subagent`, `agent` inside threads
+- Threads: `thread`, `threads`, `phase`, `parallel`, `pipeline`, `answer.done()`
+- MCP: `mcp`, `mcp_call`, `mcp_connect`, `mcp_disconnect`
+- Utilities: `sleep`, `diff`, `retry`, `vars`, `clear`, `inspectVar`, `keys`, `shape`, `sample`, `preview`, `help`
 
 When output is truncated, inspect it programmatically. The full result is still in runtime state:
+
 - `_last`, `_lastValue`, `_lastResult`
 - `_lastOutput`, `_lastFullOutput`
 - `_lastError`, `_lastDurationMs`, `_lastStatus`, `_lastTruncated`
 
 ## Subagents
 
-### `subagent(task, opts?)`
+`subagent(task, opts?)` runs a child pi call synchronously and returns an `AgentResult`.
 
-Runs a child agent call **synchronously** and returns an `AgentResult`.
-
-**Options:** `{ agent?, model?, tools?, timeout?, worktree?, name?, systemPromptSuffix? }`
+Options: `{ agent?, model?, tools?, timeout?, worktree?, name?, systemPromptSuffix? }`
 
 - `worktree: false` (default) — child works in the same directory
 - `worktree: true` — child gets its own git worktree + branch
 
-### `AgentResult`
-
-```ts
-{
-    status: "success" | "failure" | "blocked",
-    summary: string,
-    findings: string[],
-    artifacts: string[],
-    blockers: string[],
-    text: string,
-    ok: boolean,
-    cost: number,
-    model: string,
-    turns: number,
-    toolCalls: number,
-    durationMs: number,
-    exitCode: number,
-    branch?: string,
-    worktree?: string,
-}
-```
-
 ## MCP Integration
 
-Spindle includes a full MCP client built on the raw `@modelcontextprotocol/sdk`. Supports the complete protocol including server→client features (sampling, elicitation, roots) that other MCP integrations don't have.
+Spindle includes a full MCP client built on `@modelcontextprotocol/sdk`.
 
-### Configuration
-
-```json
-// ~/.pi/agent/mcp.json (global) or .pi/mcp.json (project, higher priority)
-{
-  "mcpServers": {
-    "context7": {
-      "url": "https://mcp.context7.com/mcp",
-      "description": "Library documentation. Up-to-date API references."
-    },
-    "chrome-devtools": {
-      "command": "npx",
-      "args": ["-y", "chrome-devtools-mcp@latest"],
-      "description": "Chrome browser automation and debugging."
-    }
-  },
-  "imports": ["cursor", "claude-code"]
-}
-```
-
-### Usage
+Config: `~/.pi/agent/mcp.json` or `.pi/mcp.json`.
 
 ```js
-await mcp()                    // list servers with connection status
-await mcp("context7")         // list tools (from cache or live)
+await mcp()
+await mcp("context7")
 r = await mcp_call("context7", "resolve-library-id", { libraryName: "react" })
 
 c7 = await mcp_connect("context7")
@@ -156,12 +143,15 @@ await mcp_disconnect("context7")
 | `/spindle cleanup` | Remove orphaned worktrees, branches, tmux sessions |
 | `/spindle mcp` | List MCP servers |
 | `/spindle mcp reload` | Reload MCP config |
+| `/spindle threads` | List saved threads and recent runs |
+| `/spindle run <name>` | Run a saved thread |
+| `/spindle save-thread <name>` | Create a project thread from a template |
 | `/spindle status` | Show runtime state |
 
 ## Requirements
 
-- **git** — required for `worktree: true`
 - **pi** — the coding agent
+- **git** — required for `worktree: true`
 
 ## License
 

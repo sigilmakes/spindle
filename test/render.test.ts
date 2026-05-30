@@ -15,7 +15,7 @@ const theme = {
 describe("formatCodeForDisplay", () => {
     it("formats short code with header", () => {
         const result = formatCodeForDisplay('console.log("hi")', theme);
-        expect(result).toContain("spindle_exec");
+        expect(result).toContain("spindle");
         expect(result).toContain('console.log("hi")');
     });
 
@@ -28,7 +28,7 @@ describe("formatCodeForDisplay", () => {
     });
 
     it("handles empty code", () => {
-        expect(formatCodeForDisplay("", theme)).toContain("spindle_exec");
+        expect(formatCodeForDisplay("", theme)).toContain("spindle");
     });
 });
 

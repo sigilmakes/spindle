@@ -1,9 +1,9 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionUIContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { StringEnum, Type } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Repl } from "./repl.js";
 import { createToolWrappers, createFileIO } from "./tools.js";
 import { createDiff, retry, createContextTools, createInspectionTools } from "./builtins.js";
@@ -21,6 +21,7 @@ import {
     formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
+import { ThreadManager, formatThreadList, formatThreadRun, parseThreadMeta, renderThreadResult, saveThread, summarizeRun, type SpindleThreadDetails, type ThreadAgentOptions } from "./thread/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,7 +33,7 @@ export default function spindle(pi: ExtensionAPI) {
         "Promise", "URL", "TextEncoder", "TextDecoder", "Buffer", "process", "require", "global", "globalThis",
         "read", "bash", "grep", "find", "edit", "write", "ls",
         "load", "save",
-        "subagent",
+        "subagent", "thread", "threads",
         "mcp", "mcp_call", "mcp_connect", "mcp_disconnect",
         "sleep", "diff", "retry", "vars", "clear", "inspectVar", "keys", "shape", "sample", "preview", "help",
     ]);
@@ -43,6 +44,7 @@ export default function spindle(pi: ExtensionAPI) {
     const cumulativeUsage = { totalCost: 0, totalSubagents: 0 };
     let currentSignal: AbortSignal | undefined;
     let widgetUi: ExtensionUIContext | null = null;
+    let threadManager: ThreadManager | null = null;
 
     function getAgentGuidelineLines(): string[] {
         const agents = discoverAgents(cwd);
@@ -56,6 +58,39 @@ export default function spindle(pi: ExtensionAPI) {
                 return `  - ${a.name}: ${a.description} (${meta.join(", ")})`;
             }),
         ];
+    }
+
+    function getThreadManager(workingDir: string = cwd): ThreadManager {
+        if (!threadManager) {
+            threadManager = new ThreadManager({
+                cwd: workingDir,
+                agentExecutor: async (task: string, opts?: ThreadAgentOptions) => {
+                    const result = await subagent(task, opts || {}, workingDir, subModel);
+                    cumulativeUsage.totalCost += result.cost;
+                    cumulativeUsage.totalSubagents++;
+                    updateSpindleStatus();
+                    return result;
+                },
+                onUpdate: () => updateSpindleStatus(),
+            });
+        }
+        threadManager.setCwd(workingDir);
+        return threadManager;
+    }
+
+    function formatThreadLibrary(manager: ThreadManager): string {
+        const entries = manager.discover();
+        if (entries.length === 0) {
+            return "No saved threads found. Add project threads in .pi/threads/*.js or use /spindle save-thread <name>.";
+        }
+        const lines = [`Saved threads (${entries.length}):`];
+        for (const entry of entries) {
+            const phases = entry.meta.phases?.length ? ` · ${entry.meta.phases.length} phase${entry.meta.phases.length === 1 ? "" : "s"}` : "";
+            lines.push(`  ${entry.name} [${entry.scope}]${phases}`);
+            lines.push(`    ${entry.description}`);
+            if (entry.meta.whenToUse) lines.push(`    when: ${entry.meta.whenToUse}`);
+        }
+        return lines.join("\n");
     }
 
     function updateSpindleStatus(): void {
@@ -72,6 +107,18 @@ export default function spindle(pi: ExtensionAPI) {
                 parts.push(theme.fg("success", `MCP: ${connected}/${servers.size}`));
             } else {
                 parts.push(`MCP: ${servers.size} server${servers.size !== 1 ? "s" : ""}`);
+            }
+        }
+
+        if (threadManager) {
+            const runs = threadManager.list();
+            const active = runs.filter((run) => run.status === "running" || run.status === "queued" || run.status === "awaiting_approval");
+            if (active.length > 0) {
+                const agents = active.flatMap((run) => run.phases.flatMap((phase) => phase.agents));
+                const done = agents.filter((agent) => agent.status === "done" || agent.status === "cached").length;
+                parts.push(theme.fg("warning", `Threads: ${active.length} · ${done}/${agents.length}`));
+            } else if (runs.length > 0) {
+                parts.push(theme.fg("dim", `Threads: ${runs.length} recent`));
             }
         }
 
@@ -102,6 +149,14 @@ export default function spindle(pi: ExtensionAPI) {
                 updateSpindleStatus();
                 return result;
             },
+            thread: async (nameOrScript: string, args?: unknown) => {
+                const manager = getThreadManager(cwd);
+                const input = nameOrScript.includes("export const meta")
+                    ? { script: nameOrScript, args }
+                    : { name: nameOrScript, args };
+                return (await manager.run(input)).result;
+            },
+            threads: () => getThreadManager(cwd).list(),
         });
 
         r.inject({
@@ -155,6 +210,13 @@ export default function spindle(pi: ExtensionAPI) {
                 "    blockers[], text, ok, cost, model, turns, toolCalls,",
                 "    durationMs, exitCode, branch?, worktree? }",
                 "",
+                "Threads (scripted multi-agent orchestration):",
+                "  result = await thread('name', args)       Run .pi/threads/name.js",
+                "  result = await thread(`export const meta = ...`)  Run inline script",
+                "  threads()                                 Recent thread runs",
+                "  Thread DSL: phase(), log(), agent(), parallel(), pipeline(),",
+                "    thread(), context, args, answer.done(value)",
+                "",
                 "MCP (servers discovered from ~/.pi/agent/mcp.json + .pi/mcp.json):",
                 "  mcp()                       List MCP servers with status",
                 "  mcp('server')               List tools (from cache or live)",
@@ -167,7 +229,7 @@ export default function spindle(pi: ExtensionAPI) {
                 "  inspectVar(name), keys(valueOrName), shape(valueOrName),",
                 "  sample(valueOrName, n?), preview(valueOrName, opts?), help()",
                 "",
-                "Automatic last-result vars after every spindle_exec call:",
+                "Automatic last-result vars after every spindle code call:",
                 "  _last, _lastValue, _lastResult, _lastOutput, _lastFullOutput,",
                 "  _lastError, _lastDurationMs, _lastStatus, _lastTruncated",
                 "",
@@ -176,6 +238,8 @@ export default function spindle(pi: ExtensionAPI) {
                 "  /spindle cleanup            Remove orphaned worktrees, branches, tmux sessions",
                 "  /spindle config subModel <m> Set default subagent model",
                 "  /spindle mcp                List MCP servers",
+                "  /spindle threads            Inspect recent thread runs and library",
+                "  /spindle run <name>         Run a saved thread from .pi/threads",
                 "  /spindle mcp reload         Reload MCP config",
                 "",
                 "Scoping: const, let, var, and bare assignments persist across calls.",
@@ -188,6 +252,7 @@ export default function spindle(pi: ExtensionAPI) {
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
         widgetUi = ctx.ui;
+        getThreadManager(ctx.cwd);
 
         const mcpHandlers: McpHandlers = {
             onRoots: async () => ({
@@ -278,70 +343,169 @@ export default function spindle(pi: ExtensionAPI) {
         repl = null;
     });
 
+    function buildStatusDetails(): SpindleStatusDetails {
+        const variables = repl?.getVariables() ?? [];
+        return {
+            variables,
+            usage: { ...cumulativeUsage },
+            config: { subModel, outputLimit: 8192 },
+        };
+    }
+
+    function formatStatusText(details: SpindleStatusDetails): string {
+        const varSummary = details.variables.length > 0
+            ? details.variables.map(v => `  ${v.name}: ${v.type} = ${v.preview}`).join("\n")
+            : "  (none)";
+
+        const manager = getThreadManager(cwd);
+        const runs = manager.list();
+        const active = runs.filter((run) => run.status === "running" || run.status === "queued" || run.status === "awaiting_approval");
+
+        return [
+            "Spindle Status",
+            "",
+            "Variables:",
+            varSummary,
+            "",
+            `Usage: ${details.usage.totalSubagents} subagent calls, $${details.usage.totalCost.toFixed(4)}`,
+            `Config: sub-model=${details.config.subModel || "(default)"}`,
+            `Threads: ${runs.length} recent, ${active.length} active`,
+            `Last vars: _lastValue, _lastResult, _lastOutput, _lastError, _lastStatus`,
+        ].join("\n");
+    }
+
+    function codeLooksLikeThread(code: string): boolean {
+        return /export\s+const\s+meta\s*=/.test(code)
+            || /(^|[^.\w$])(?:phase|agent|parallel|pipeline|log)\s*\(/m.test(code)
+            || /(^|[^.\w$])answer\s*\./m.test(code);
+    }
+
+    function wrapScratchThread(code: string): string {
+        if (/export\s+const\s+meta\s*=/.test(code)) return code;
+        return [
+            "export const meta = {",
+            "    name: \"scratch\",",
+            "    description: \"Ad-hoc Spindle thread\",",
+            "};",
+            "",
+            code,
+        ].join("\n");
+    }
+
     pi.registerTool({
-        name: "spindle_exec",
+        name: "spindle",
         label: "Spindle",
-        description: "Execute JavaScript in a persistent Node runtime with built-in tools, sync subagents, and MCP.",
+        description: "Run Spindle threads: persistent Node orchestration, programmatic subagents, phases, parallelism, caching, structured outputs, and status inspection.",
         parameters: Type.Object({
-            code: Type.String({ description: "JavaScript code to execute" }),
+            code: Type.Optional(Type.String({ description: "JavaScript for a scratch thread. Use phase(), agent(), parallel(), pipeline(), or plain Node orchestration." })),
+            name: Type.Optional(Type.String({ description: "Saved thread name from .pi/threads or ~/.pi/agent/threads" })),
+            script: Type.Optional(Type.String({ description: "Inline thread script. May export `meta`; otherwise Spindle wraps it as a scratch thread." })),
+            scriptPath: Type.Optional(Type.String({ description: "Path to a thread script file" })),
+            args: Type.Optional(Type.Any({ description: "JSON-serializable arguments exposed to threads as args/context" })),
+            inspect: Type.Optional(StringEnum(["status", "threads"] as const, {
+                description: "Inspect runtime status or saved/recent threads instead of executing code",
+            })),
         }),
+        promptSnippet: "Run programmatic multi-agent threads with persistent Node orchestration",
         promptGuidelines: [
             [
-                "Use spindle_exec when you need to chain operations, transform data, spawn subagents, or persist state.",
-                "Use native tools (read, edit, write, bash) for single straightforward operations.",
-                "",
-                "Think in JavaScript, not bash:",
-                "  ✗ bash({command: \"find src -name '*.ts' | xargs grep 'export'\"})  ← shell for data",
-                "  ✓ hits = await grep({pattern: 'export class', path: 'src/'})       ← builtin + JS",
-                "",
-                "This runtime is proper Node, not a vm sandbox:",
-                "  fs = require('node:fs')",
-                "  path = require('node:path')",
-                "  mod = await import('node:os')",
-                "  console.log(process.version)",
-                "",
-                "If output is truncated, inspect it programmatically — the full result is still in:",
-                "  _lastValue, _lastResult, _lastFullOutput",
-                "  preview(_lastValue), shape(_lastValue), keys(_lastValue), sample(_lastValue)",
-                "",
-                "Subagents are sync by default:",
-                "  r = await subagent('find all auth code')",
-                "  r.findings",
-                "  r = await subagent('refactor auth module', { worktree: true })",
-                "  await bash({ command: `git merge ${r.branch}` })",
-                "",
-                "MCP (these are spindle_exec builtins — all MCP calls go through the runtime):",
-                "  await mcp()                              // list servers",
-                "  await mcp('server')                      // list tools on a server",
-                "  r = await mcp_call('server', 'tool', {})  // one-shot call",
-                "  proxy = await mcp_connect('server')       // persistent proxy",
-                "  r = await proxy.toolName({args})          // camelCase method calls",
-                "  await mcp_disconnect('server')            // close connection",
-                "",
-                "const/let/var and bare assignments persist across calls.",
-                "",
-                "Builtins: read, edit, write, bash, grep, find, ls, load, save,",
-                "  subagent, mcp, mcp_call, mcp_connect, mcp_disconnect,",
-                "  sleep, diff, retry, vars, clear, inspectVar, keys, shape,",
-                "  sample, preview, help",
+                "Use spindle when coordination or state matters: programmatic subagents, phased work, parallel review, MCP calls, reusable scripts, caching, or structured outputs.",
+                "Use native tools (read, edit, write, bash) for single straightforward operations; use spindle for composed work.",
+                "Call spindle with { code } for a scratch thread, { name, args } for a saved thread, { script, args } for an inline thread, or { scriptPath, args } for a file-backed thread.",
+                "Saved threads live in .pi/threads/*.js or ~/.pi/agent/threads/*.js and export `const meta = { name, description, phases }`.",
+                "Thread DSL: phase(), log(), agent(), subagent(), parallel(), pipeline(), thread(), context, args, answer.done(value).",
+                "Plain { code } also has real Node globals and builtins: read, edit, write, bash, grep, find, ls, load, save, subagent, thread, threads, mcp, mcp_call, mcp_connect, mcp_disconnect, sleep, diff, retry, vars, clear, inspectVar, keys, shape, sample, preview, help.",
+                "If output is truncated, inspect the full value through _lastValue, _lastResult, _lastFullOutput, preview(), shape(), keys(), or sample().",
+                "Use spindle with { inspect: 'threads' } to discover saved threads and recent thread runs; use { inspect: 'status' } for runtime state.",
                 ...getAgentGuidelineLines(),
             ].join("\n"),
         ],
-        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-            if (!repl) repl = initRepl(ctx.cwd);
-
-            const code = params.code;
-            if (!code) {
-                return {
-                    content: [{ type: "text", text: "Error: 'code' is required." }],
-                    details: { code: "", error: true } satisfies SpindleExecDetails,
-                    isError: true,
-                };
+        prepareArguments(args): any {
+            if (!args || typeof args !== "object") return args;
+            const input = args as { action?: string; [key: string]: unknown };
+            if (input.action === "status" || input.action === "threads") {
+                const { action, ...rest } = input;
+                return { ...rest, inspect: action };
             }
-
+            if (input.action === "run" || input.action === "thread") {
+                const { action, ...rest } = input;
+                return rest;
+            }
+            return args;
+        },
+        async execute(_toolCallId, params, signal, onUpdate, ctx) {
+            if (!repl) repl = initRepl(ctx.cwd);
             currentSignal = signal;
+            let threadAttempt = false;
 
             try {
+                if (params.inspect === "threads") {
+                    const manager = getThreadManager(ctx.cwd);
+                    const library = manager.discover();
+                    const runs = manager.list();
+                    const lines = [
+                        formatThreadLibrary(manager),
+                        "",
+                        "Recent runs:",
+                        runs.length === 0 ? "No threads have run yet." : runs.map(summarizeRun).join("\n"),
+                    ];
+                    return {
+                        content: [{ type: "text" as const, text: lines.join("\n") }],
+                        details: { kind: "threads", library, runs },
+                    };
+                }
+
+                if (params.inspect === "status") {
+                    const details = buildStatusDetails();
+                    return {
+                        content: [{ type: "text" as const, text: formatStatusText(details) }],
+                        details: { kind: "status", ...details },
+                    };
+                }
+
+                const name = params.name?.trim();
+                const scriptPath = params.scriptPath?.replace(/^@/, "");
+                const inlineScript = params.script;
+                if (name || inlineScript || scriptPath) {
+                    threadAttempt = true;
+                    const manager = getThreadManager(ctx.cwd);
+                    const label = name || scriptPath || "inline";
+                    onUpdate?.({ content: [{ type: "text", text: `Starting thread ${label}...` }], details: undefined });
+                    const result = await manager.run({
+                        name,
+                        script: inlineScript ? wrapScratchThread(inlineScript) : undefined,
+                        scriptPath,
+                        args: params.args,
+                        cwd: ctx.cwd,
+                    });
+                    const text = [
+                        `Thread ${result.run.name}: ${summarizeRun(result.run)}`,
+                        result.result === undefined ? undefined : typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
+                    ].filter(Boolean).join("\n\n");
+                    return {
+                        content: [{ type: "text" as const, text }],
+                        details: { kind: "thread", run: result.run },
+                    };
+                }
+
+                const code = params.code;
+                if (!code) throw new Error("spindle requires code, name, script, scriptPath, or inspect");
+
+                if (codeLooksLikeThread(code)) {
+                    threadAttempt = true;
+                    const manager = getThreadManager(ctx.cwd);
+                    onUpdate?.({ content: [{ type: "text", text: "Starting scratch thread..." }], details: undefined });
+                    const result = await manager.run({ script: wrapScratchThread(code), args: params.args, cwd: ctx.cwd });
+                    const text = [
+                        `Thread ${result.run.name}: ${summarizeRun(result.run)}`,
+                        result.result === undefined ? undefined : typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
+                    ].filter(Boolean).join("\n\n");
+                    return {
+                        content: [{ type: "text" as const, text }],
+                        details: { kind: "thread", run: result.run },
+                    };
+                }
+
                 const result = await repl.exec(code, { signal });
                 const parts: string[] = [];
                 if (result.output) parts.push(result.output);
@@ -355,76 +519,92 @@ export default function spindle(pi: ExtensionAPI) {
                 }
 
                 return {
-                    content: [{ type: "text", text: parts.join("\n") || "(no output)" }],
+                    content: [{ type: "text" as const, text: parts.join("\n") || "(no output)" }],
                     details: {
+                        kind: "run",
                         code,
                         durationMs: result.durationMs,
                         error: !!result.error,
                         status: result.status,
                         truncated: result.truncated,
-                    } satisfies SpindleExecDetails,
+                    },
                     isError: !!result.error,
                 };
+            } catch (err: unknown) {
+                if (threadAttempt) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    const failed = getThreadManager(ctx.cwd).list()[0];
+                    return {
+                        content: [{ type: "text" as const, text: `Thread failed: ${error.message}` }],
+                        details: failed ? { kind: "thread", run: failed } : undefined,
+                        isError: true,
+                    };
+                }
+                throw err;
             } finally {
                 currentSignal = undefined;
                 updateSpindleStatus();
             }
         },
         renderCall(args, theme) {
-            return new Text(formatCodeForDisplay(args.code || "", theme), 0, 0);
+            if (args.inspect) {
+                return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", `inspect ${args.inspect}`)}`, 0, 0);
+            }
+            if (args.name || args.scriptPath || args.script) {
+                const target = args.name || args.scriptPath || "inline thread";
+                return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", target)}`, 0, 0);
+            }
+            if (args.code) return new Text(formatCodeForDisplay(args.code, theme), 0, 0);
+            return new Text(theme.fg("toolTitle", theme.bold("spindle")), 0, 0);
         },
         renderResult(result, options, theme) {
-            return new Text(formatExecResult(result as AgentToolResult<SpindleExecDetails>, options.expanded, theme), 0, 0);
-        },
-    });
-
-    pi.registerTool({
-        name: "spindle_status",
-        label: "Spindle Status",
-        description: "Show runtime variables, usage stats, and configuration.",
-        parameters: Type.Object({}),
-        async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-            if (!repl) repl = initRepl(ctx.cwd);
-
-            const variables = repl.getVariables();
-            const details: SpindleStatusDetails = {
-                variables,
-                usage: { ...cumulativeUsage },
-                config: { subModel, outputLimit: 8192 },
-            };
-
-            const varSummary = variables.length > 0
-                ? variables.map(v => `  ${v.name}: ${v.type} = ${v.preview}`).join("\n")
-                : "  (none)";
-
-            const p = [
-                "Spindle Status",
-                "",
-                "Variables:",
-                varSummary,
-                "",
-                `Usage: ${cumulativeUsage.totalSubagents} subagent calls, $${cumulativeUsage.totalCost.toFixed(4)}`,
-                `Config: sub-model=${subModel || "(default)"}`,
-                `Last vars: _lastValue, _lastResult, _lastOutput, _lastError, _lastStatus`,
-            ];
-
-            return {
-                content: [{ type: "text", text: p.join("\n") }],
-                details,
-            };
-        },
-        renderResult(result, _options, theme) {
-            const details = result.details as SpindleStatusDetails;
-            if (!details) {
-                const text = result.content[0];
-                return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+            const details = result.details as ({ kind?: string } & Record<string, unknown>) | undefined;
+            if (details?.kind === "run") {
+                return new Text(formatExecResult(result as AgentToolResult<SpindleExecDetails>, options.expanded, theme), 0, 0);
             }
-            return new Text(formatStatusResult(details, theme), 0, 0);
+            if (details?.kind === "thread") {
+                return renderThreadResult(result as AgentToolResult<SpindleThreadDetails>, options.expanded, theme);
+            }
+            if (details?.kind === "status") {
+                return new Text(formatStatusResult(details as unknown as SpindleStatusDetails, theme), 0, 0);
+            }
+            if (details?.kind === "threads") {
+                const runs = (details.runs ?? []) as ReturnType<ThreadManager["list"]>;
+                const library = (details.library ?? []) as ReturnType<ThreadManager["discover"]>;
+                const lines = [
+                    library.length === 0 ? theme.fg("muted", "No saved threads found.") : theme.fg("accent", `Saved threads (${library.length})`),
+                    ...library.flatMap((entry) => [`  ${theme.fg("toolTitle", entry.name)} ${theme.fg("dim", `[${entry.scope}]`)}`, `    ${theme.fg("muted", entry.description)}`]),
+                    "",
+                    theme.fg("accent", "Recent runs"),
+                    formatThreadList(runs, theme),
+                ];
+                return new Text(lines.join("\n"), 0, 0);
+            }
+            const text = result.content[0];
+            return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
         },
     });
 
     pi.registerCommand("spindle", {
-        description: "Spindle control — reset, config, cleanup, attach, list, mcp",
+        description: "Spindle control — reset, config, cleanup, mcp, threads, run",
+        getArgumentCompletions: (prefix: string) => {
+            const parts = prefix.trimStart().split(/\s+/);
+            const first = parts[0] ?? "";
+            if (parts.length <= 1 && !prefix.endsWith(" ")) {
+                const commands = ["reset", "config", "cleanup", "mcp", "status", "threads", "run", "save-thread", "help"];
+                const items = commands.filter((cmd) => cmd.startsWith(first)).map((cmd) => ({ value: cmd, label: cmd }));
+                return items.length > 0 ? items : null;
+            }
+            if (first === "run") {
+                const partial = parts[1] ?? "";
+                const entries = getThreadManager(cwd).discover();
+                const items = entries
+                    .filter((entry) => entry.name.startsWith(partial))
+                    .map((entry) => ({ value: entry.name, label: entry.name, description: entry.description }));
+                return items.length > 0 ? items : null;
+            }
+            return null;
+        },
         async handler(args, ctx) {
             const parts = args.trim().split(/\s+/);
             const sub = parts[0]?.toLowerCase();
@@ -443,7 +623,70 @@ export default function spindle(pi: ExtensionAPI) {
                     ctx.ui.notify("Usage: /spindle config subModel <value>", "warning");
                 }
             } else if (sub === "attach" || sub === "list") {
-                ctx.ui.notify("Subagents are synchronous now. tmux is no longer the primary execution path.", "info");
+                ctx.ui.notify("Subagents are synchronous now. tmux is no longer the primary execution path. Use /spindle threads for orchestration history.", "info");
+            } else if (sub === "threads") {
+                const manager = getThreadManager(ctx.cwd);
+                const runs = manager.list();
+                const theme = ctx.ui.theme;
+                const sections = [
+                    formatThreadLibrary(manager),
+                    "",
+                    "Recent runs:",
+                    formatThreadList(runs, theme),
+                    "",
+                    "Run a saved thread with /spindle run <name> or spindle({ name }).",
+                ];
+                ctx.ui.notify(sections.join("\n"), "info");
+            } else if (sub === "run") {
+                const name = parts.slice(1).join(" ").trim();
+                if (!name) {
+                    ctx.ui.notify("Usage: /spindle run <thread-name>", "warning");
+                } else {
+                    const manager = getThreadManager(ctx.cwd);
+                    ctx.ui.notify(`Running thread: ${name}`, "info");
+                    try {
+                        const result = await manager.run({ name, cwd: ctx.cwd });
+                        ctx.ui.notify(formatThreadRun(result.run, ctx.ui.theme, true), "info");
+                    } catch (err: unknown) {
+                        const error = err instanceof Error ? err.message : String(err);
+                        const failed = manager.list()[0];
+                        ctx.ui.notify(failed ? formatThreadRun(failed, ctx.ui.theme, true) : `Thread failed: ${error}`, "error");
+                    }
+                }
+            } else if (sub === "save-thread") {
+                const name = parts.slice(1).join(" ").trim();
+                if (!name) {
+                    ctx.ui.notify("Usage: /spindle save-thread <name>", "warning");
+                } else {
+                    const template = [
+                        "export const meta = {",
+                        `    name: ${JSON.stringify(name)},`,
+                        `    description: "Describe what ${name} coordinates.",`,
+                        "    phases: [",
+                        "        { title: \"Plan\", detail: \"Map the work\" },",
+                        "        { title: \"Execute\", detail: \"Run the agents\" },",
+                        "    ],",
+                        "};",
+                        "",
+                        "phase(\"Plan\");",
+                        "log(\"starting\", { args });",
+                        "",
+                        "phase(\"Execute\");",
+                        "const result = await agent(`Do the work for ${meta.name}. Context: ${JSON.stringify(args)}`, { label: \"worker\" });",
+                        "",
+                        "return answer.done(result);",
+                    ].join("\n");
+                    const script = await ctx.ui.editor(`Create thread: ${name}`, template);
+                    if (!script) return;
+                    try {
+                        parseThreadMeta(script);
+                        const filePath = saveThread(ctx.cwd, name, script, "project");
+                        ctx.ui.notify(`Saved thread: ${filePath}`, "info");
+                    } catch (err: unknown) {
+                        const error = err instanceof Error ? err.message : String(err);
+                        ctx.ui.notify(`Thread not saved: ${error}`, "error");
+                    }
+                }
             } else if (sub === "mcp") {
                 const mcpSub = parts[1]?.toLowerCase();
                 if (mcpSub === "reload") {
@@ -487,11 +730,11 @@ export default function spindle(pi: ExtensionAPI) {
                 }
                 ctx.ui.notify(lines.join("\n"), result.errors.length > 0 ? "warning" : "info");
             } else if (sub === "status") {
-                pi.sendUserMessage("Show Spindle status using the spindle_status tool.");
+                pi.sendUserMessage("Show Spindle status using spindle with { inspect: 'status' }.");
             } else if (!sub || sub === "help") {
-                ctx.ui.notify("Usage: /spindle <reset|config|cleanup|mcp|status|attach|list>", "info");
+                ctx.ui.notify("Usage: /spindle <reset|config|cleanup|mcp|status|threads|run|save-thread>", "info");
             } else {
-                pi.sendUserMessage(`Use Spindle (spindle_exec) for this task:\n\n${args}`);
+                pi.sendUserMessage(`Use the spindle tool for this task:\n\n${args}`);
             }
         },
     });

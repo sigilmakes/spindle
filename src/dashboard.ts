@@ -5,8 +5,8 @@
  */
 
 import { readStatusFile, type SubagentHandle } from "./workers.js";
-import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 function formatDuration(ms: number): string {
     const seconds = Math.floor(ms / 1000);
