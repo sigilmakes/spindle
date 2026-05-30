@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import * as os from "node:os";
+import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
@@ -21,11 +23,33 @@ import {
     formatCodeForDisplay, formatExecResult, formatStatusResult,
     type SpindleExecDetails, type SpindleStatusDetails,
 } from "./render.js";
-import { ThreadManager, discoverThreads, formatThreadList, formatThreadRun, parseThreadMeta, renderThreadResult, saveThread, summarizeRun, type SpindleThreadDetails, type ThreadAgentOptions } from "./thread/index.js";
+import {
+    WorkflowRuntime,
+    discoverWorkflows,
+    resolveWorkflow,
+    saveWorkflow,
+    parseWorkflowMeta,
+    summarizeWorkflowRun,
+    formatWorkflowRun,
+    formatWorkflowList,
+    renderWorkflowResult,
+    type SpindleWorkflowDetails,
+    type WorkflowRun,
+    type WorkflowInput,
+    type WorkflowReceipt,
+    type WorkflowAgentCompletion,
+    type WorkflowAgentRequest,
+    type WorkflowAgentDriver,
+} from "./workflow/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 setExtensionDir(__dirname);
+
+function xdgStateDir(): string {
+    const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+    return path.join(base, "spindle");
+}
 
 export default function spindle(pi: ExtensionAPI) {
     const BUILTIN_NAMES = new Set([
@@ -44,8 +68,11 @@ export default function spindle(pi: ExtensionAPI) {
     const cumulativeUsage = { totalCost: 0, totalSubagents: 0 };
     let currentSignal: AbortSignal | undefined;
     let widgetUi: ExtensionUIContext | null = null;
-    let threadManager: ThreadManager | null = null;
     let spindleQueue: Promise<void> = Promise.resolve();
+
+    // Workflow engine state
+    const workflowRuns = new Map<string, WorkflowRun>();
+    const workflowCache = new Map<string, unknown>();
 
     function enqueueSpindle<T>(fn: () => Promise<T>): Promise<T> {
         const run = spindleQueue.then(fn, fn);
@@ -67,56 +94,57 @@ export default function spindle(pi: ExtensionAPI) {
         ];
     }
 
-    function getThreadManager(workingDir: string = cwd): ThreadManager {
-        if (!threadManager) {
-            threadManager = new ThreadManager({
-                cwd: workingDir,
-                agentExecutor: async (task: string, opts?: ThreadAgentOptions) => {
-                    const result = await subagent(task, opts || {}, workingDir, subModel);
-                    cumulativeUsage.totalCost += result.cost;
-                    cumulativeUsage.totalSubagents++;
-                    updateSpindleStatus();
-                    return result;
-                },
-                onUpdate: () => updateSpindleStatus(),
-            });
-        }
-        threadManager.setCwd(workingDir);
-        return threadManager;
-    }
-
-    function formatThreadLibrary(manager: ThreadManager): string {
-        const entries = manager.discover();
-        if (entries.length === 0) {
-            return "No saved threads found. Add project threads in .pi/threads/*.js or use /spindle save-thread <name>.";
-        }
-        const lines = [`Saved threads (${entries.length}):`];
-        for (const entry of entries) {
-            const phases = entry.meta.phases?.length ? ` · ${entry.meta.phases.length} phase${entry.meta.phases.length === 1 ? "" : "s"}` : "";
-            lines.push(`  ${entry.name} [${entry.scope}]${phases}`);
-            lines.push(`    ${entry.description}`);
-            if (entry.meta.whenToUse) lines.push(`    when: ${entry.meta.whenToUse}`);
-        }
-        return lines.join("\n");
-    }
-
     function buildDynamicPromptSummary(workingDir: string): string {
         const sections: string[] = [];
         const agentLines = getAgentGuidelineLines();
         if (agentLines.length > 0) sections.push(agentLines.join("\n"));
 
-        const entries = discoverThreads(workingDir);
+        const entries = discoverWorkflows(workingDir);
         if (entries.length > 0) {
             sections.push([
-                "Available Spindle threads (run with spindle({ name, args })):",
+                "Available Spindle workflows (call spindle({ name, args })):",
                 ...entries.map((entry) => {
-                    const when = entry.meta.whenToUse ? ` — ${entry.meta.whenToUse}` : "";
+                    const when = entry.whenToUse ? ` — ${entry.whenToUse}` : "";
                     return `  - ${entry.name}: ${entry.description} (${entry.scope})${when}`;
                 }),
             ].join("\n"));
         }
 
         return sections.filter(Boolean).join("\n\n");
+    }
+
+    // ── Agent driver adapter: bridges workflow core to existing sync subagent ──
+    function makeSyncAgentDriver(workingDir: string, model?: string): WorkflowAgentDriver {
+        return async (request: WorkflowAgentRequest): Promise<WorkflowAgentCompletion> => {
+            const result = await subagent(request.prompt, {
+                ...request.options,
+                name: request.label,
+                agent: request.options.agent ?? request.options.agentType,
+                worktree: request.options.worktree ?? request.options.isolation === "worktree",
+            }, workingDir, model);
+            cumulativeUsage.totalCost += result.cost;
+            cumulativeUsage.totalSubagents++;
+            updateSpindleStatus();
+            return {
+                status: result.ok ? "success" : "failure",
+                summary: result.summary,
+                findings: result.findings,
+                artifacts: result.artifacts,
+                blockers: result.blockers,
+                text: result.text,
+                ok: result.ok,
+                value: result.ok ? result.text : undefined,
+                raw: result,
+                cost: result.cost,
+                model: result.model,
+                turns: result.turns,
+                toolCalls: result.toolCalls,
+                durationMs: result.durationMs,
+                exitCode: result.exitCode,
+                branch: result.branch,
+                worktree: result.worktree,
+            };
+        };
     }
 
     function updateSpindleStatus(): void {
@@ -136,16 +164,15 @@ export default function spindle(pi: ExtensionAPI) {
             }
         }
 
-        if (threadManager) {
-            const runs = threadManager.list();
-            const active = runs.filter((run) => run.status === "running" || run.status === "queued" || run.status === "awaiting_approval");
-            if (active.length > 0) {
-                const agents = active.flatMap((run) => run.phases.flatMap((phase) => phase.agents));
-                const done = agents.filter((agent) => agent.status === "done" || agent.status === "cached").length;
-                parts.push(theme.fg("warning", `Threads: ${active.length} · ${done}/${agents.length}`));
-            } else if (runs.length > 0) {
-                parts.push(theme.fg("dim", `Threads: ${runs.length} recent`));
-            }
+        const runs = [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt);
+        const active = runs.filter((r) => r.status === "running" || r.status === "queued" || r.status === "waiting");
+        if (active.length > 0) {
+            const agentCount = active.reduce((sum, r) => sum + r.agentOrder.length, 0);
+            const agentRunning = active.reduce((sum, r) =>
+                sum + r.agentOrder.filter((id) => r.agents[id]?.status === "running").length, 0);
+            parts.push(theme.fg("warning", `WF: ${active.length} · ${agentRunning}/${agentCount}`));
+        } else if (runs.length > 0) {
+            parts.push(theme.fg("dim", `WF: ${runs.length} recent`));
         }
 
         if (repl) {
@@ -176,13 +203,12 @@ export default function spindle(pi: ExtensionAPI) {
                 return result;
             },
             thread: async (nameOrScript: string, args?: unknown) => {
-                const manager = getThreadManager(cwd);
-                const input = nameOrScript.includes("export const meta")
-                    ? { script: nameOrScript, args }
-                    : { name: nameOrScript, args };
-                return (await manager.run(input)).result;
+                if (nameOrScript.includes("export const meta")) {
+                    return (await launchWorkflow({ script: nameOrScript, args }, workingDir)).result;
+                }
+                return (await launchWorkflow({ name: nameOrScript, args }, workingDir)).result;
             },
-            threads: () => getThreadManager(cwd).list(),
+            threads: () => [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt),
         });
 
         r.inject({
@@ -211,74 +237,68 @@ export default function spindle(pi: ExtensionAPI) {
 
         r.inject({
             help: () => [
-                "=== Spindle Node Runtime ===",
+                "=== Spindle Runtime ===",
                 "",
-                "This is a persistent JavaScript runtime with a proper Node environment.",
-                "`require`, `process`, `Buffer`, `globalThis`, and dynamic `import()` all work.",
+                "Persistent JavaScript runtime with real Node environment + workflow orchestration.",
                 "",
-                "Tools (return ToolResult { output, error, ok, exitCode }):",
-                "  read({ path })              Read a file",
-                "  edit({ path, oldText, newText })  Replace exact text",
-                "  write({ path, content })    Create or overwrite",
-                "  bash({ command, timeout? }) Run shell command",
-                "  grep({ pattern, path })     Search with ripgrep",
-                "  find({ pattern, path })     Find files by glob",
-                "  ls({ path })                List directory",
+                "Workflows (call spindle tool or /spindle run <name>):",
+                "  spindle({ script: `export const meta = { name, description, phases }; ...` })",
+                "  spindle({ name: 'review', args: { area: 'src/' } })",
+                "  Saved workflows live in .pi/threads/*.js",
+                "  DSL: phase(), log(), agent(), parallel(), pipeline(), workflow()",
                 "",
-                "File I/O (bypasses context window):",
-                "  load(path)                  File → string, directory → Map",
-                "  save(path, content)         Write without entering context",
+                "REPL builtins: read, edit, write, bash, grep, find, ls, load, save,",
+                "  subagent, sleep, diff, retry, vars, clear, mcp*, help",
                 "",
-                "Subagents (sync by default):",
-                "  r = await subagent(task, opts?)   // returns AgentResult",
-                "  opts: { agent, model, tools, timeout, worktree, name }",
-                "  AgentResult: { status, summary, findings[], artifacts[],",
-                "    blockers[], text, ok, cost, model, turns, toolCalls,",
-                "    durationMs, exitCode, branch?, worktree? }",
-                "",
-                "Threads (scripted multi-agent orchestration):",
-                "  result = await thread('name', args)       Run .pi/threads/name.js",
-                "  result = await thread(`export const meta = ...`)  Run inline script",
-                "  threads()                                 Recent thread runs",
-                "  Thread DSL: phase(), log(), agent(), parallel(), pipeline(),",
-                "    thread(), context, args, answer.done(value)",
-                "",
-                "MCP (servers discovered from ~/.pi/agent/mcp.json + .pi/mcp.json):",
-                "  mcp()                       List MCP servers with status",
-                "  mcp('server')               List tools (from cache or live)",
-                "  mcp_call(server, tool, args) One-shot tool call (lazy connect)",
-                "  mcp_connect(server)         Persistent proxy with camelCase methods",
-                "  mcp_disconnect(server?)     Close connections",
-                "",
-                "Utilities:",
-                "  sleep(ms), diff(a,b), retry(fn,opts?), vars(), clear(),",
-                "  inspectVar(name), keys(valueOrName), shape(valueOrName),",
-                "  sample(valueOrName, n?), preview(valueOrName, opts?), help()",
-                "",
-                "Automatic last-result vars after every spindle code call:",
-                "  _last, _lastValue, _lastResult, _lastOutput, _lastFullOutput,",
-                "  _lastError, _lastDurationMs, _lastStatus, _lastTruncated",
-                "",
-                "Commands:",
-                "  /spindle reset              Reset runtime state",
-                "  /spindle cleanup            Remove orphaned worktrees, branches, tmux sessions",
-                "  /spindle config subModel <m> Set default subagent model",
-                "  /spindle mcp                List MCP servers",
-                "  /spindle threads            Inspect recent thread runs and library",
-                "  /spindle run <name>         Run a saved thread from .pi/threads",
-                "  /spindle mcp reload         Reload MCP config",
-                "",
-                "Scoping: const, let, var, and bare assignments persist across calls.",
+                "Commands: /spindle workflows, /spindle attach <id>, /spindle cleanup",
             ].join("\n"),
         });
 
         return r;
     }
 
+    // ── Workflow execution ──
+    async function launchWorkflow(input: WorkflowInput, workingDir: string): Promise<{ run: WorkflowRun; result: unknown }> {
+        let script: string | undefined;
+        let scriptPath: string | undefined;
+
+        if (input.scriptPath) {
+            scriptPath = path.resolve(workingDir, input.scriptPath.replace(/^@/, ""));
+            script = fs.readFileSync(scriptPath, "utf-8");
+        } else if (input.name) {
+            const resolved = await resolveWorkflow(workingDir, input.name);
+            script = resolved.script;
+            scriptPath = resolved.scriptPath;
+        } else if (input.script) {
+            script = input.script;
+        } else {
+            throw new Error("spindle requires script, name, or scriptPath");
+        }
+
+        const runtime = new WorkflowRuntime({
+            cwd: workingDir,
+            input,
+            script,
+            scriptPath,
+            cache: workflowCache,
+            agentDriver: makeSyncAgentDriver(workingDir, subModel),
+            resolveWorkflowScript: (nameOrPath) => resolveWorkflow(workingDir, nameOrPath),
+            onUpdate: (run) => {
+                workflowRuns.set(run.id, run);
+                updateSpindleStatus();
+            },
+        });
+
+        const result = await runtime.execute();
+        workflowRuns.set(result.run.id, result.run);
+        updateSpindleStatus();
+        return result;
+    }
+
+    // ── Pi lifecycle ──
     pi.on("session_start", async (_event, ctx) => {
         repl = initRepl(ctx.cwd);
         widgetUi = ctx.ui;
-        getThreadManager(ctx.cwd);
 
         const mcpHandlers: McpHandlers = {
             onRoots: async () => ({
@@ -297,14 +317,10 @@ export default function spindle(pi: ExtensionAPI) {
                 const text = typeof lastMessage === "object" && lastMessage !== null
                     ? JSON.stringify(lastMessage)
                     : String(lastMessage ?? "");
-
                 return {
                     model: "spindle-passthrough",
                     role: "assistant" as const,
-                    content: {
-                        type: "text" as const,
-                        text: `[Sampling requested by MCP server. System: ${systemPrompt}. Last message: ${text}]`,
-                    },
+                    content: { type: "text" as const, text: `[Sampling requested]` },
                     stopReason: "endTurn",
                 };
             },
@@ -314,33 +330,17 @@ export default function spindle(pi: ExtensionAPI) {
         if (ctx.hasUI) {
             const servers = mcpGetServers();
             if (servers.size > 0) {
-                const globalServers: string[] = [];
-                const projectServers: string[] = [];
-                const importedServers: string[] = [];
-
+                const lines: string[] = ["[MCP Servers]"];
                 for (const [name, resolved] of servers) {
                     const desc = resolved.entry.description ? ` — ${resolved.entry.description}` : "";
-                    const line = `      ${name}${desc}`;
-                    if (resolved.source === "project") projectServers.push(line);
-                    else if (resolved.source === "global") globalServers.push(line);
-                    else importedServers.push(line);
-                }
-
-                const lines: string[] = ["[MCP Servers]"];
-                if (projectServers.length > 0) {
-                    lines.push("  project", ...projectServers);
-                }
-                if (globalServers.length > 0) {
-                    lines.push("  global", ...globalServers);
-                }
-                if (importedServers.length > 0) {
-                    lines.push("  imported", ...importedServers);
+                    lines.push(`  ${resolved.source}: ${name}${desc}`);
                 }
                 ctx.ui.notify(lines.join("\n"), "info");
             }
             updateSpindleStatus();
         }
 
+        // Restore config from session entries
         const entries = ctx.sessionManager.getEntries();
         for (let i = entries.length - 1; i >= 0; i--) {
             const entry = entries[i];
@@ -356,10 +356,7 @@ export default function spindle(pi: ExtensionAPI) {
     pi.on("before_agent_start", async (event, ctx) => {
         const sections = [mcpGetPromptSummary(), buildDynamicPromptSummary(ctx.cwd)].filter(Boolean);
         if (sections.length === 0) return;
-
-        return {
-            systemPrompt: event.systemPrompt + "\n\n" + sections.join("\n\n"),
-        };
+        return { systemPrompt: event.systemPrompt + "\n\n" + sections.join("\n\n") };
     });
 
     pi.on("session_shutdown", async () => {
@@ -369,6 +366,7 @@ export default function spindle(pi: ExtensionAPI) {
         repl = null;
     });
 
+    // ── Status helpers ──
     function buildStatusDetails(): SpindleStatusDetails {
         const variables = repl?.getVariables() ?? [];
         return {
@@ -383,9 +381,8 @@ export default function spindle(pi: ExtensionAPI) {
             ? details.variables.map(v => `  ${v.name}: ${v.type} = ${v.preview}`).join("\n")
             : "  (none)";
 
-        const manager = getThreadManager(cwd);
-        const runs = manager.list();
-        const active = runs.filter((run) => run.status === "running" || run.status === "queued" || run.status === "awaiting_approval");
+        const runs = [...workflowRuns.values()];
+        const active = runs.filter((r) => r.status === "running" || r.status === "queued");
 
         return [
             "Spindle Status",
@@ -395,68 +392,74 @@ export default function spindle(pi: ExtensionAPI) {
             "",
             `Usage: ${details.usage.totalSubagents} subagent calls, $${details.usage.totalCost.toFixed(4)}`,
             `Config: sub-model=${details.config.subModel || "(default)"}`,
-            `Threads: ${runs.length} recent, ${active.length} active`,
-            `Last vars: _lastValue, _lastResult, _lastOutput, _lastError, _lastStatus`,
+            `Workflows: ${runs.length} recent, ${active.length} active`,
         ].join("\n");
     }
 
-    function codeLooksLikeThread(code: string): boolean {
-        return /export\s+const\s+meta\s*=/.test(code)
-            || /(^|[^.\w$])(?:phase|agent|parallel|pipeline|log)\s*\(/m.test(code)
-            || /(^|[^.\w$])answer\s*\./m.test(code);
+    function formatWorkflowLibrarySummary(): string {
+        const entries = discoverWorkflows(cwd);
+        if (entries.length === 0) return "No saved workflows. Add .pi/threads/*.js or /spindle save <name>.";
+        const lines = [`Saved workflows (${entries.length}):`];
+        for (const entry of entries) {
+            const phases = entry.meta.phases?.length ? ` · ${entry.meta.phases.length} phase${entry.meta.phases.length === 1 ? "" : "s"}` : "";
+            lines.push(`  ${entry.name} [${entry.scope}]${phases}`);
+            lines.push(`    ${entry.description}`);
+            if (entry.whenToUse) lines.push(`    when: ${entry.whenToUse}`);
+        }
+        return lines.join("\n");
     }
 
-    function wrapScratchThread(code: string): string {
-        if (/export\s+const\s+meta\s*=/.test(code)) return code;
-        return [
-            "export const meta = {",
-            "    name: \"scratch\",",
-            "    description: \"Ad-hoc Spindle thread\",",
-            "};",
-            "",
-            code,
-        ].join("\n");
-    }
-
+    // ── Tool: spindle ──
     pi.registerTool({
         name: "spindle",
         label: "Spindle",
-        description: "Run Spindle threads: persistent Node orchestration, programmatic subagents, phases, parallelism, caching, structured outputs, and status inspection.",
+        description:
+            "Run a Spindle workflow: scripted multi-agent orchestration with phases, parallelism, caching, structured outputs, and resume.",
         parameters: Type.Object({
-            code: Type.Optional(Type.String({ description: "JavaScript for a scratch thread. Use phase(), agent(), parallel(), pipeline(), or plain Node orchestration." })),
-            name: Type.Optional(Type.String({ description: "Saved thread name from .pi/threads or ~/.pi/agent/threads" })),
-            script: Type.Optional(Type.String({ description: "Inline thread script. May export `meta`; otherwise Spindle wraps it as a scratch thread." })),
-            scriptPath: Type.Optional(Type.String({ description: "Path to a thread script file" })),
-            args: Type.Optional(Type.Any({ description: "JSON-serializable arguments exposed to threads as args/context" })),
-            inspect: Type.Optional(StringEnum(["status", "threads"] as const, {
-                description: "Inspect runtime status or saved/recent threads instead of executing code",
+            script: Type.Optional(Type.String({
+                description: "Inline workflow script. Must begin with `export const meta = { ... }`.",
+            })),
+            name: Type.Optional(Type.String({
+                description: "Saved workflow name from .pi/threads or ~/.pi/agent/threads",
+            })),
+            scriptPath: Type.Optional(Type.String({
+                description: "Path to a workflow script file (highest priority)",
+            })),
+            args: Type.Optional(Type.Any({
+                description: "JSON-serializable arguments exposed to the workflow as `args`",
+            })),
+            resumeFromRunId: Type.Optional(Type.String({
+                description: "Resume from a previous run's checkpoint (same session only)",
             })),
         }),
-        promptSnippet: "Run programmatic multi-agent threads with persistent Node orchestration",
+        promptSnippet: "Run scripted multi-agent workflows with phases, parallelism, and caching",
         promptGuidelines: [
             [
-                "Use spindle when coordination or state matters: programmatic subagents, phased work, parallel review, MCP calls, reusable scripts, caching, or structured outputs.",
-                "Use native tools (read, edit, write, bash) for single straightforward operations; use spindle for composed work.",
-                "Call spindle with { code } for a scratch thread, { name, args } for a saved thread, { script, args } for an inline thread, or { scriptPath, args } for a file-backed thread.",
-                "Saved threads live in .pi/threads/*.js or ~/.pi/agent/threads/*.js and export `const meta = { name, description, phases }`.",
-                "Thread DSL: phase(), log(), agent(), subagent(), parallel(), pipeline(), thread(), context, args, answer.done(value).",
-                "Plain { code } also has real Node globals and builtins: read, edit, write, bash, grep, find, ls, load, save, subagent, thread, threads, mcp, mcp_call, mcp_connect, mcp_disconnect, sleep, diff, retry, vars, clear, inspectVar, keys, shape, sample, preview, help.",
-                "If output is truncated, inspect the full value through _lastValue, _lastResult, _lastFullOutput, preview(), shape(), keys(), or sample().",
-                "Use spindle with { inspect: 'threads' } to discover saved threads and recent thread runs; use { inspect: 'status' } for runtime state.",
-                "Spindle serializes its own calls because the runtime is stateful. If a result depends on prior state, keep the request order explicit.",
+                "Use spindle when coordination or multi-agent orchestration matters: phased work, parallel review, data pipelines, structured extraction, or reusable scripts.",
+                "Use native tools (read, edit, write, bash) for single operations; use spindle for composed work.",
+                "Call spindle with { script } for an inline workflow, { name, args } for a saved workflow, or { scriptPath, args } for a file-backed workflow.",
+                "Workflow scripts must begin with `export const meta = { name, description, phases? }` as a pure literal.",
+                "Workflow DSL: phase(), log(), agent(), parallel(), pipeline(), workflow(), budget, args.",
+                "Use pipeline() by default for multi-stage work; use parallel() only for barrier fan-out that needs all results together.",
+                "Inside parallel/pipeline, pass { phase: 'PhaseName' } to each agent() for explicit grouping — don't rely on the global phase() during concurrency.",
+                "Give every agent a descriptive label: agent(prompt, { label: 'review:security' }).",
+                "When a workflow agent needs to produce structured output, pass a schema: agent(prompt, { schema: { type:'object', properties:{...}, required:[...] } }).",
+                "Filter parallel/pipeline results with .filter(Boolean) to handle nulls from failed agents.",
+                "Saved workflows live in .pi/threads/*.js or ~/.pi/agent/threads/*.js.",
                 ...getAgentGuidelineLines(),
             ].join("\n"),
         ],
         prepareArguments(args): any {
             if (!args || typeof args !== "object") return args;
             const input = args as { action?: string; [key: string]: unknown };
-            if (input.action === "status" || input.action === "threads") {
-                const { action, ...rest } = input;
-                return { ...rest, inspect: action };
-            }
+            // Accept legacy action fields
             if (input.action === "run" || input.action === "thread") {
                 const { action, ...rest } = input;
                 return rest;
+            }
+            // Reject old code-only mode — require explicit script format
+            if (input.code && !input.script && !input.name && !input.scriptPath) {
+                return { script: `export const meta = { name: "inline", description: "Inline code" };\n\n${input.code}` };
             }
             return args;
         },
@@ -464,121 +467,42 @@ export default function spindle(pi: ExtensionAPI) {
             return enqueueSpindle(async () => {
                 if (!repl) repl = initRepl(ctx.cwd);
                 currentSignal = signal;
-                let threadAttempt = false;
 
                 try {
-                if (params.inspect === "threads") {
-                    const manager = getThreadManager(ctx.cwd);
-                    const library = manager.discover();
-                    const runs = manager.list();
-                    const lines = [
-                        formatThreadLibrary(manager),
-                        "",
-                        "Recent runs:",
-                        runs.length === 0 ? "No threads have run yet." : runs.map(summarizeRun).join("\n"),
-                    ];
-                    return {
-                        content: [{ type: "text" as const, text: lines.join("\n") }],
-                        details: { kind: "threads", library, runs },
-                    };
-                }
-
-                if (params.inspect === "status") {
-                    const details = buildStatusDetails();
-                    return {
-                        content: [{ type: "text" as const, text: formatStatusText(details) }],
-                        details: { kind: "status", ...details },
-                    };
-                }
-
-                const name = params.name?.trim();
-                const scriptPath = params.scriptPath?.replace(/^@/, "");
-                const inlineScript = params.script;
-                if (name || inlineScript || scriptPath) {
-                    threadAttempt = true;
-                    const manager = getThreadManager(ctx.cwd);
-                    const label = name || scriptPath || "inline";
-                    onUpdate?.({ content: [{ type: "text", text: `Starting thread ${label}...` }], details: undefined });
-                    const result = await manager.run({
-                        name,
-                        script: inlineScript ? wrapScratchThread(inlineScript) : undefined,
-                        scriptPath,
+                    const result = await launchWorkflow({
+                        script: params.script,
+                        name: params.name,
+                        scriptPath: params.scriptPath,
                         args: params.args,
-                        cwd: ctx.cwd,
-                    }, (run) => {
-                        onUpdate?.({
-                            content: [{ type: "text", text: `Thread ${run.name}: ${summarizeRun(run)}` }],
-                            details: { kind: "thread", run },
-                        });
+                        resumeFromRunId: params.resumeFromRunId,
+                    }, ctx.cwd);
+
+                    // Stream progress updates
+                    onUpdate?.({
+                        content: [{ type: "text", text: `Workflow ${result.run.name}: ${summarizeWorkflowRun(result.run)}` }],
+                        details: { kind: "workflow", run: result.run } satisfies SpindleWorkflowDetails,
                     });
+
                     const text = [
-                        `Thread ${result.run.name}: ${summarizeRun(result.run)}`,
-                        result.result === undefined ? undefined : typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
+                        `Workflow ${result.run.name}: ${summarizeWorkflowRun(result.run)}`,
+                        result.result === undefined ? undefined
+                            : typeof result.result === "string" ? result.result
+                            : JSON.stringify(result.result, null, 2),
                     ].filter(Boolean).join("\n\n");
+
                     return {
                         content: [{ type: "text" as const, text }],
-                        details: { kind: "thread", run: result.run },
+                        details: { kind: "workflow", run: result.run } satisfies SpindleWorkflowDetails,
                     };
-                }
-
-                const code = params.code;
-                if (!code) throw new Error("spindle requires code, name, script, scriptPath, or inspect");
-
-                if (codeLooksLikeThread(code)) {
-                    threadAttempt = true;
-                    const manager = getThreadManager(ctx.cwd);
-                    onUpdate?.({ content: [{ type: "text", text: "Starting scratch thread..." }], details: undefined });
-                    const result = await manager.run({ script: wrapScratchThread(code), args: params.args, cwd: ctx.cwd }, (run) => {
-                        onUpdate?.({
-                            content: [{ type: "text", text: `Thread ${run.name}: ${summarizeRun(run)}` }],
-                            details: { kind: "thread", run },
-                        });
-                    });
-                    const text = [
-                        `Thread ${result.run.name}: ${summarizeRun(result.run)}`,
-                        result.result === undefined ? undefined : typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2),
-                    ].filter(Boolean).join("\n\n");
-                    return {
-                        content: [{ type: "text" as const, text }],
-                        details: { kind: "thread", run: result.run },
-                    };
-                }
-
-                const result = await repl.exec(code, { signal });
-                const parts: string[] = [];
-                if (result.output) parts.push(result.output);
-                if (result.error) parts.push(`Error (${result.status}): ${result.error}`);
-                if (result.truncated) {
-                    parts.push([
-                        "",
-                        `Output truncated. The full result is still in REPL state: _lastValue / _lastResult / _lastFullOutput.`,
-                        `Inspect it with preview(_lastValue), shape(_lastValue), keys(_lastValue), sample(_lastValue), or inspectVar('_lastResult').`,
-                    ].join("\n"));
-                }
-
-                return {
-                    content: [{ type: "text" as const, text: parts.join("\n") || "(no output)" }],
-                    details: {
-                        kind: "run",
-                        code,
-                        durationMs: result.durationMs,
-                        error: !!result.error,
-                        status: result.status,
-                        truncated: result.truncated,
-                    },
-                    isError: !!result.error,
-                };
-            } catch (err: unknown) {
-                if (threadAttempt) {
+                } catch (err: unknown) {
                     const error = err instanceof Error ? err : new Error(String(err));
-                    const failed = getThreadManager(ctx.cwd).list()[0];
+                    const failedId = [...workflowRuns.values()].pop()?.id;
+                    const failed = failedId ? workflowRuns.get(failedId) : undefined;
                     return {
-                        content: [{ type: "text" as const, text: `Thread failed: ${error.message}` }],
-                        details: failed ? { kind: "thread", run: failed } : undefined,
+                        content: [{ type: "text" as const, text: `Workflow failed: ${error.message}` }],
+                        details: failed ? { kind: "workflow" as const, run: failed } satisfies SpindleWorkflowDetails : undefined,
                         isError: true,
                     };
-                }
-                throw err;
                 } finally {
                     currentSignal = undefined;
                     updateSpindleStatus();
@@ -586,61 +510,52 @@ export default function spindle(pi: ExtensionAPI) {
             });
         },
         renderCall(args, theme) {
-            if (args.inspect) {
-                return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", `inspect ${args.inspect}`)}`, 0, 0);
+            if (args.name) return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", args.name)}`, 0, 0);
+            if (args.scriptPath) return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", args.scriptPath)}`, 0, 0);
+            if (args.script) {
+                const metaMatch = args.script.match(/name:\s*['"]([^'"]+)['"]/);
+                const name = metaMatch?.[1] ?? "inline";
+                return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", name)}`, 0, 0);
             }
-            if (args.name || args.scriptPath || args.script) {
-                const target = args.name || args.scriptPath || "inline thread";
-                return new Text(`${theme.fg("toolTitle", theme.bold("spindle"))} ${theme.fg("accent", target)}`, 0, 0);
-            }
-            if (args.code) return new Text(formatCodeForDisplay(args.code, theme), 0, 0);
             return new Text(theme.fg("toolTitle", theme.bold("spindle")), 0, 0);
         },
         renderResult(result, options, theme) {
-            const details = result.details as ({ kind?: string } & Record<string, unknown>) | undefined;
-            if (details?.kind === "run") {
-                return new Text(formatExecResult(result as AgentToolResult<SpindleExecDetails>, options.expanded, theme), 0, 0);
-            }
-            if (details?.kind === "thread") {
-                return renderThreadResult(result as AgentToolResult<SpindleThreadDetails>, options.expanded, theme);
-            }
-            if (details?.kind === "status") {
-                return new Text(formatStatusResult(details as unknown as SpindleStatusDetails, theme), 0, 0);
-            }
-            if (details?.kind === "threads") {
-                const runs = (details.runs ?? []) as ReturnType<ThreadManager["list"]>;
-                const library = (details.library ?? []) as ReturnType<ThreadManager["discover"]>;
-                const lines = [
-                    library.length === 0 ? theme.fg("muted", "No saved threads found.") : theme.fg("accent", `Saved threads (${library.length})`),
-                    ...library.flatMap((entry) => [`  ${theme.fg("toolTitle", entry.name)} ${theme.fg("dim", `[${entry.scope}]`)}`, `    ${theme.fg("muted", entry.description)}`]),
-                    "",
-                    theme.fg("accent", "Recent runs"),
-                    formatThreadList(runs, theme),
-                ];
-                return new Text(lines.join("\n"), 0, 0);
-            }
-            const text = result.content[0];
-            return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+            return renderWorkflowResult(result as AgentToolResult<SpindleWorkflowDetails>, options.expanded, theme);
         },
     });
 
+    // ── Slash commands ──
     pi.registerCommand("spindle", {
-        description: "Spindle control — reset, config, cleanup, mcp, threads, run",
+        description: "Spindle control — workflows, agents, cleanup, config",
         getArgumentCompletions: (prefix: string) => {
             const parts = prefix.trimStart().split(/\s+/);
             const first = parts[0] ?? "";
+            const subcommands = [
+                "workflows", "agents", "attach", "message", "stop", "pause", "resume",
+                "rerun", "save", "reset", "config", "cleanup", "mcp", "status",
+            ];
             if (parts.length <= 1 && !prefix.endsWith(" ")) {
-                const commands = ["reset", "config", "cleanup", "mcp", "status", "threads", "run", "save-thread", "help"];
-                const items = commands.filter((cmd) => cmd.startsWith(first)).map((cmd) => ({ value: cmd, label: cmd }));
+                const items = subcommands.filter((cmd) => cmd.startsWith(first)).map((cmd) => ({ value: cmd, label: cmd }));
                 return items.length > 0 ? items : null;
             }
-            if (first === "run") {
+            if ((first === "run" || first === "attach" || first === "message" || first === "stop") && parts.length === 2) {
                 const partial = parts[1] ?? "";
-                const entries = getThreadManager(cwd).discover();
-                const items = entries
-                    .filter((entry) => entry.name.startsWith(partial))
-                    .map((entry) => ({ value: entry.name, label: entry.name, description: entry.description }));
-                return items.length > 0 ? items : null;
+                // Complete workflow names for run, agent IDs for others
+                if (first === "run") {
+                    const entries = discoverWorkflows(cwd);
+                    const items = entries
+                        .filter((e) => e.name.startsWith(partial))
+                        .map((e) => ({ value: e.name, label: e.name, description: e.description }));
+                    return items.length > 0 ? items : null;
+                }
+                // Agent IDs from active/recent runs
+                const agentIds: string[] = [];
+                for (const run of [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt)) {
+                    for (const id of run.agentOrder) {
+                        if (id.startsWith(partial)) agentIds.push(id);
+                    }
+                }
+                return agentIds.length > 0 ? agentIds.map((id) => ({ value: id, label: id })) : null;
             }
             return null;
         },
@@ -648,7 +563,126 @@ export default function spindle(pi: ExtensionAPI) {
             const parts = args.trim().split(/\s+/);
             const sub = parts[0]?.toLowerCase();
 
-            if (sub === "reset") {
+            if (sub === "workflows" || sub === "wf") {
+                const runs = [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt);
+                const theme = ctx.ui.theme;
+                const sections = [
+                    formatWorkflowLibrarySummary(),
+                    "",
+                    "Recent runs:",
+                    formatWorkflowList(runs, theme),
+                    "",
+                    "Run: spindle({ name })  Attach: /spindle attach <agentId>",
+                ];
+                ctx.ui.notify(sections.join("\n"), "info");
+            } else if (sub === "agents") {
+                const runs = [...workflowRuns.values()].sort((a, b) => b.startedAt - a.startedAt);
+                const theme = ctx.ui.theme;
+                const lines: string[] = ["Workflow agents:"];
+                for (const run of runs.slice(0, 20)) {
+                    for (const id of run.agentOrder) {
+                        const agent = run.agents[id];
+                        if (!agent) continue;
+                        const dur = agent.durationMs ? ` ${(agent.durationMs / 1000).toFixed(1)}s` : "";
+                        const phase = agent.phase ? ` [${agent.phase}]` : "";
+                        lines.push(`  ${colorAgent(agent.status, theme)} ${agent.label} ${theme.fg("dim", `${run.name}${phase}${dur}`)}`);
+                    }
+                }
+                if (lines.length === 1) lines.push(theme.fg("muted", "  No agents yet."));
+                ctx.ui.notify(lines.join("\n"), "info");
+            } else if (sub === "attach" || sub === "message") {
+                // In v1 with sync subagents, attach is informational only.
+                // Real attach will come with Phase 2 (long-lived agent sessions).
+                const agentId = parts[1];
+                if (!agentId) {
+                    ctx.ui.notify(`Usage: /spindle ${sub} <agentId>`, "warning");
+                    return;
+                }
+                // Find agent across runs
+                let found: WorkflowRun | undefined;
+                let agent: import("./workflow/index.js").WorkflowAgentNode | undefined;
+                for (const run of workflowRuns.values()) {
+                    const a = run.agents[agentId];
+                    if (a) { found = run; agent = a; break; }
+                }
+                if (!found || !agent) {
+                    ctx.ui.notify(`Agent ${agentId} not found. Use /spindle agents to list.`, "warning");
+                    return;
+                }
+                const msg = parts.slice(2).join(" ").trim();
+                if (sub === "attach") {
+                    const theme = ctx.ui.theme;
+                    const info = [
+                        `${theme.fg("toolTitle", theme.bold(agent.label))} (${agentId})`,
+                        `  Status: ${agent.status}`,
+                        `  Run: ${found.name} (${found.id})`,
+                        `  Phase: ${agent.phase ?? "(none)"}`,
+                        `  ${agent.promptPreview}`,
+                    ].join("\n");
+                    ctx.ui.notify(info, "info");
+                    if (agent.status === "running" || agent.status === "waiting") {
+                        ctx.ui.notify("Attach/messaging requires long-lived agent sessions (coming soon). For now, agents complete synchronously.", "info");
+                    }
+                } else if (msg) {
+                    ctx.ui.notify(`Message to ${agent.label}: ${msg}\n(Interactive messaging requires long-lived agent sessions — coming soon.)`, "info");
+                } else {
+                    ctx.ui.notify(`Usage: /spindle message <agentId> <text>`, "warning");
+                }
+            } else if (sub === "stop") {
+                const target = parts[1];
+                if (!target) { ctx.ui.notify("Usage: /spindle stop <runId | agentId>", "warning"); return; }
+                const run = workflowRuns.get(target);
+                if (run && (run.status === "running" || run.status === "queued")) {
+                    run.status = "cancelled";
+                    run.updatedAt = Date.now();
+                    updateSpindleStatus();
+                    ctx.ui.notify(`Workflow ${run.name} (${run.id}) cancelled.`, "info");
+                } else {
+                    ctx.ui.notify(`No active run found for ${target}.`, "warning");
+                }
+            } else if (sub === "save") {
+                const name = parts[1];
+                if (!name) { ctx.ui.notify("Usage: /spindle save <name>", "warning"); return; }
+                const template = [
+                    "export const meta = {",
+                    `    name: ${JSON.stringify(name)},`,
+                    `    description: "Describe what ${name} coordinates.",`,
+                    "    phases: [",
+                    "        { title: \"Plan\", detail: \"Map the work\" },",
+                    "        { title: \"Execute\", detail: \"Run the agents\" },",
+                    "    ],",
+                    "};",
+                    "",
+                    "phase(\"Plan\");",
+                    "log(\"starting\", { args });",
+                    "",
+                    "phase(\"Execute\");",
+                    "const result = await agent(`Do the work for ${meta.name}. Context: ${JSON.stringify(args)}`, { label: \"worker\" });",
+                    "",
+                    "return result;",
+                ].join("\n");
+                const script = await ctx.ui.editor(`Create workflow: ${name}`, template);
+                if (!script) return;
+                try {
+                    parseWorkflowMeta(script);
+                    const filePath = saveWorkflow(ctx.cwd, name, script, "project");
+                    ctx.ui.notify(`Saved workflow: ${filePath}`, "info");
+                } catch (err: unknown) {
+                    const error = err instanceof Error ? err.message : String(err);
+                    ctx.ui.notify(`Not saved: ${error}`, "error");
+                }
+            } else if (sub === "run") {
+                const name = parts.slice(1).join(" ").trim();
+                if (!name) { ctx.ui.notify("Usage: /spindle run <workflow-name>", "warning"); return; }
+                ctx.ui.notify(`Running workflow: ${name}`, "info");
+                try {
+                    const result = await launchWorkflow({ name }, ctx.cwd);
+                    ctx.ui.notify(formatWorkflowRun(result.run, ctx.ui.theme, true), "info");
+                } catch (err: unknown) {
+                    const error = err instanceof Error ? err.message : String(err);
+                    ctx.ui.notify(`Workflow failed: ${error}`, "error");
+                }
+            } else if (sub === "reset") {
                 repl?.reset();
                 ctx.ui.notify("Spindle runtime reset", "info");
             } else if (sub === "config") {
@@ -661,122 +695,52 @@ export default function spindle(pi: ExtensionAPI) {
                 } else {
                     ctx.ui.notify("Usage: /spindle config subModel <value>", "warning");
                 }
-            } else if (sub === "attach" || sub === "list") {
-                ctx.ui.notify("Subagents are synchronous now. tmux is no longer the primary execution path. Use /spindle threads for orchestration history.", "info");
-            } else if (sub === "threads") {
-                const manager = getThreadManager(ctx.cwd);
-                const runs = manager.list();
-                const theme = ctx.ui.theme;
-                const sections = [
-                    formatThreadLibrary(manager),
-                    "",
-                    "Recent runs:",
-                    formatThreadList(runs, theme),
-                    "",
-                    "Run a saved thread with /spindle run <name> or spindle({ name }).",
-                ];
-                ctx.ui.notify(sections.join("\n"), "info");
-            } else if (sub === "run") {
-                const name = parts.slice(1).join(" ").trim();
-                if (!name) {
-                    ctx.ui.notify("Usage: /spindle run <thread-name>", "warning");
-                } else {
-                    const manager = getThreadManager(ctx.cwd);
-                    ctx.ui.notify(`Running thread: ${name}`, "info");
-                    try {
-                        const result = await manager.run({ name, cwd: ctx.cwd });
-                        ctx.ui.notify(formatThreadRun(result.run, ctx.ui.theme, true), "info");
-                    } catch (err: unknown) {
-                        const error = err instanceof Error ? err.message : String(err);
-                        const failed = manager.list()[0];
-                        ctx.ui.notify(failed ? formatThreadRun(failed, ctx.ui.theme, true) : `Thread failed: ${error}`, "error");
-                    }
-                }
-            } else if (sub === "save-thread") {
-                const name = parts.slice(1).join(" ").trim();
-                if (!name) {
-                    ctx.ui.notify("Usage: /spindle save-thread <name>", "warning");
-                } else {
-                    const template = [
-                        "export const meta = {",
-                        `    name: ${JSON.stringify(name)},`,
-                        `    description: "Describe what ${name} coordinates.",`,
-                        "    phases: [",
-                        "        { title: \"Plan\", detail: \"Map the work\" },",
-                        "        { title: \"Execute\", detail: \"Run the agents\" },",
-                        "    ],",
-                        "};",
-                        "",
-                        "phase(\"Plan\");",
-                        "log(\"starting\", { args });",
-                        "",
-                        "phase(\"Execute\");",
-                        "const result = await agent(`Do the work for ${meta.name}. Context: ${JSON.stringify(args)}`, { label: \"worker\" });",
-                        "",
-                        "return answer.done(result);",
-                    ].join("\n");
-                    const script = await ctx.ui.editor(`Create thread: ${name}`, template);
-                    if (!script) return;
-                    try {
-                        parseThreadMeta(script);
-                        const filePath = saveThread(ctx.cwd, name, script, "project");
-                        ctx.ui.notify(`Saved thread: ${filePath}`, "info");
-                    } catch (err: unknown) {
-                        const error = err instanceof Error ? err.message : String(err);
-                        ctx.ui.notify(`Thread not saved: ${error}`, "error");
-                    }
-                }
+            } else if (sub === "cleanup") {
+                const result = cleanupWorktrees(ctx.cwd);
+                const lines: string[] = [];
+                if (result.removedWorktrees.length > 0) lines.push(`Removed ${result.removedWorktrees.length} worktree(s)`);
+                if (result.removedBranches.length > 0) lines.push(`Removed ${result.removedBranches.length} branch(es)`);
+                if (result.removedSessions.length > 0) lines.push(`Killed ${result.removedSessions.length} tmux session(s)`);
+                if (result.errors.length > 0) lines.push(`Errors: ${result.errors.join("; ")}`);
+                ctx.ui.notify(lines.length === 0 ? "Nothing to clean up." : lines.join("\n"), result.errors.length > 0 ? "warning" : "info");
             } else if (sub === "mcp") {
                 const mcpSub = parts[1]?.toLowerCase();
                 if (mcpSub === "reload") {
                     await mcpReload(ctx.cwd);
                     const servers = mcpGetServers();
-                    ctx.ui.notify(`MCP config reloaded. ${servers.size} server(s) configured.`, "info");
+                    ctx.ui.notify(`MCP reloaded. ${servers.size} server(s).`, "info");
                 } else {
                     const servers = mcpGetServers();
                     if (servers.size === 0) {
-                        ctx.ui.notify("No MCP servers configured.\nConfig: ~/.pi/agent/mcp.json or .pi/mcp.json", "info");
+                        ctx.ui.notify("No MCP servers. Config: ~/.pi/agent/mcp.json or .pi/mcp.json", "info");
                     } else {
-                        const lines: string[] = [`MCP servers (${servers.size}):`];
+                        const lines = [`MCP servers (${servers.size}):`];
                         for (const [name, resolved] of servers) {
-                            let line = `  ${name} [${resolved.source}]`;
-                            if (resolved.entry.description) {
-                                line += ` — ${resolved.entry.description}`;
-                            }
-                            lines.push(line);
+                            lines.push(`  ${name} [${resolved.source}]${resolved.entry.description ? ` — ${resolved.entry.description}` : ""}`);
                         }
-                        lines.push("", "Use /spindle mcp reload to refresh config.");
                         ctx.ui.notify(lines.join("\n"), "info");
                     }
                 }
-            } else if (sub === "cleanup" || sub === "clean") {
-                const result = cleanupWorktrees(ctx.cwd);
-                const lines: string[] = [];
-                if (result.removedWorktrees.length > 0) {
-                    lines.push(`Removed ${result.removedWorktrees.length} worktree(s): ${result.removedWorktrees.join(", ")}`);
-                }
-                if (result.removedBranches.length > 0) {
-                    lines.push(`Removed ${result.removedBranches.length} branch(es): ${result.removedBranches.join(", ")}`);
-                }
-                if (result.removedSessions.length > 0) {
-                    lines.push(`Killed ${result.removedSessions.length} tmux session(s): ${result.removedSessions.join(", ")}`);
-                }
-                if (result.errors.length > 0) {
-                    lines.push(`Errors: ${result.errors.join("; ")}`);
-                }
-                if (lines.length === 0) {
-                    lines.push("Nothing to clean up.");
-                }
-                ctx.ui.notify(lines.join("\n"), result.errors.length > 0 ? "warning" : "info");
             } else if (sub === "status") {
-                pi.sendUserMessage("Show Spindle status using spindle with { inspect: 'status' }.");
-            } else if (!sub || sub === "help") {
-                ctx.ui.notify("Usage: /spindle <reset|config|cleanup|mcp|status|threads|run|save-thread>", "info");
+                const details = buildStatusDetails();
+                ctx.ui.notify(formatStatusText(details), "info");
             } else {
-                pi.sendUserMessage(`Use the spindle tool for this task:\n\n${args}`);
+                const subcommands = "workflows | agents | attach | message | stop | save | run | reset | config | cleanup | mcp | status";
+                ctx.ui.notify(`Usage: /spindle <${subcommands}>`, "info");
             }
         },
     });
+
+    // Helper for command rendering
+    function colorAgent(status: string, theme: import("@earendil-works/pi-coding-agent").Theme): string {
+        const sym = status === "completed" || status === "cached" ? "✓" : status === "failed" || status === "cancelled" ? "✗" : status === "running" ? "●" : "○";
+        switch (status) {
+            case "completed": case "cached": return theme.fg("success", sym);
+            case "failed": case "cancelled": return theme.fg("error", sym);
+            case "running": return theme.fg("warning", sym);
+            default: return theme.fg("muted", sym);
+        }
+    }
 }
 
 export { Repl } from "./repl.js";
@@ -794,3 +758,21 @@ export { loadMcpConfig, buildServerPromptSummary } from "./mcp-config.js";
 export { subagent, killAllSubagents, getActiveSubagents, getSubagent, cleanupWorktrees, readStatusFile, isTmuxPaneAlive, killTmuxSession } from "./workers.js";
 export type { SubagentHandle, AgentResult, SubagentOptions, CleanupResult, StatusFile } from "./workers.js";
 export { EPISODE_PROMPT, parseEpisodeBlock } from "./episode.js";
+export {
+    WorkflowRuntime,
+    discoverWorkflows,
+    resolveWorkflow,
+    saveWorkflow,
+    parseWorkflowMeta,
+    summarizeWorkflowRun,
+    formatWorkflowRun,
+    formatWorkflowList,
+    renderWorkflowResult,
+    type SpindleWorkflowDetails,
+    type WorkflowRun,
+    type WorkflowInput,
+    type WorkflowReceipt,
+    type WorkflowAgentCompletion,
+    type WorkflowAgentRequest,
+    type WorkflowAgentDriver,
+} from "./workflow/index.js";
